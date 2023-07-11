@@ -11,13 +11,13 @@ function usage {
     echo "  stop            stop a shell with an environment loaded"
     echo "  status          print information about each running environment"
     echo "  modules         view module status and activate with --use"
-    echo "  load-view       load a view"
+    echo "  view            activate a view"
 }
 
 function uenv {
     if [ "$1" = "--version" ]; then
         echo "uenv version ${VERSION}";
-    elif [[ $# -eq 0 || "$1" = "--help" ]]; then
+    elif [[ $# -eq 0 || "$1" = "--help" || "$1" = "-h" ]]; then
         usage;
     else
         eval "$($UENV_CMD "$@")"
