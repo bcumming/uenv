@@ -33,6 +33,8 @@ jobs:
     permissions:
       contents: write
     needs: rpm
+    permissions:
+      contents: write
     steps:
       - name: download-artifacts
         uses: actions/download-artifact@v3
