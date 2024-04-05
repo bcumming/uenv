@@ -8,8 +8,10 @@ version=$(cat "$script_path/VERSION")
 # default installation destination, only required for building rpm packages
 destdir=""
 
+# takes an argument, either aarch64 or x86_64
+# returns arm64 or amd64, accordingly
 get_oras_arch() {
-  case "$(uname -m)" in
+  case "$1" in
     aarch64)
       echo "arm64"
       ;;
@@ -17,6 +19,10 @@ get_oras_arch() {
       echo "amd64"
       ;;
   esac
+}
+
+detect_oras_arch() {
+    echo $(get_oras_arch "$(uname -m)")
 }
 
 function usage {
@@ -27,6 +33,7 @@ function usage {
     echo "--local   : install locally for this user (default prefix \$HOME/.local)"
     echo "--yes     : default response to all queries is yes"
     echo "--help    : print this message"
+    echo "--arch    : force installing for a specific arch: x86_64 or aarch64"
 }
 
 function prompt_bash_update {
@@ -79,6 +86,13 @@ always_yes=no
 # default install system wide
 local_install=no
 
+# Set the architecture of the system we are installing on.
+# Required when building RPMs on a system with a different arch
+# than the RPM target.
+# Note: only needed to download the appropriate oras tar ball
+# by default we set it to auto, which tries to automatically detect the arch
+oras_arch=auto
+
 # dry-run (systemwide install only)
 uenv_debug=no
 
@@ -104,6 +118,9 @@ do
         ;;
         --debug)
         uenv_debug=yes
+        ;;
+        --arch=*)
+        oras_arch="${arg#*=}"
         ;;
         --help)
         usage
@@ -166,7 +183,13 @@ run install -D -m755 <(sed "s|@@version@@|$version|g" $script_path/uenv-impl) ${
 
 # install the oras client
 echo "installing oras client"
-oras_arch=$(get_oras_arch)
+# if an architecture is not provided -> auto detect arch
+if [[ "$oras_arch" == "auto" ]]
+then
+    oras_arch=$(detect_oras_arch)
+else
+    oras_arch=$(get_oras_arch "$oras_arch")
+fi
 oras_version=1.1.0
 oras_file=oras_${oras_version}_linux_${oras_arch}.tar.gz
 oras_url=https://github.com/oras-project/oras/releases/download/v${oras_version}/${oras_file}
