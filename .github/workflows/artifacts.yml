@@ -20,7 +20,7 @@ jobs:
           ./rpm/generate-rpm.sh -s . -b rpm-build -a x86_64
           rpmbuild -bs --define "_topdir rpm-build" --target=x86_64 rpm-build/SPECS/uenv.spec
           sudo rpmbuild --target=x86_64 --rebuild "$(find rpm-build/SRPMS -name '*.rpm' -type f -print -quit)" --define "_topdir $(pwd)/rpm-build"
-          sudo rpm --install "$(find rpm-build/RPMS -name '*.rpm' -type f -print -quit)"
+          #sudo rpm --install "$(find rpm-build/RPMS -name '*.rpm' -type f -print -quit)"
           find rpm-build -name '*.rpm' -type f -exec cp {} . \;
       - name: upload-rpm
         uses: actions/upload-artifact@v3
@@ -44,7 +44,7 @@ jobs:
           ./rpm/generate-rpm.sh -s . -b rpm-build -a aarch64
           rpmbuild -bs --define "_topdir rpm-build" --target=aarch64 rpm-build/SPECS/uenv.spec
           sudo rpmbuild --target=aarch64 --rebuild "$(find rpm-build/SRPMS -name '*.rpm' -type f -print -quit)" --define "_topdir $(pwd)/rpm-build"
-          sudo rpm --install "$(find rpm-build/RPMS -name '*.rpm' -type f -print -quit)"
+          #sudo rpm --install "$(find rpm-build/RPMS -name '*.rpm' -type f -print -quit)"
           find rpm-build -name '*.rpm' -type f -exec cp {} . \;
       - name: upload-rpm
         uses: actions/upload-artifact@v3
