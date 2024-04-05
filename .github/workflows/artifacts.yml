@@ -23,7 +23,6 @@ jobs:
           sudo rpmbuild --target=x86_64 --rebuild "$(find rpm-build/SRPMS -name '*.rpm' -type f -print -quit)" --define "_topdir $(pwd)/rpm-build"
           find rpm-build -name '*.rpm' -type f -exec cp {} . \;
           # aarch64
-          set -x
           sudo rm -rf ./rpm-build
           ./rpm/generate-rpm.sh -s . -b rpm-build -a aarch64
           rpmbuild -bs --define "_topdir rpm-build" --target=aarch64 rpm-build/SPECS/uenv.spec
