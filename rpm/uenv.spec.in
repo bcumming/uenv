@@ -5,7 +5,6 @@ Summary:        A command line interface for interacting with user environments 
 URL:            https://eth-cscs.github.io/uenv
 Source:         %{name}-%{version}.tar.gz
 License:        ETH Zürich/CSCS
-BuildArch:      noarch
 
 %description
 A command line interface for interacting with user environments on Alps at CSCS.
@@ -15,7 +14,7 @@ A command line interface for interacting with user environments on Alps at CSCS.
 %setup -q
 
 %install
-./install --yes --destdir=%{buildroot} --prefix=/opt/cscs
+./install --yes --destdir=%{buildroot} --prefix=/opt/cscs --arch=UENV_ARCH
 
 %files
 /opt/cscs/uenv/
