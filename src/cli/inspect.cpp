@@ -151,7 +151,6 @@ int image_inspect(const image_inspect_args& args,
     if (info.meta) {
         j["description"] = value_or_none(info.meta->description);
         j["mount"] = info.meta->mount;
-        // TODO: only set meta path if it was not temporarily expanded
         for (const auto& [_, view] : info.meta->views) {
             j["views"].push_back(
                 {{"name", view.name}, {"description", view.description}});

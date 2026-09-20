@@ -119,7 +119,6 @@ int main(int argc, char** argv) {
 
     // locate the TLS trust store from the startup environment (honours
     // SSL_CERT_FILE / SSL_CERT_DIR) before any HTTPS request is made.
-    // TODO: only perform this when interactions with OCI are required
     util::curl::configure_tls(settings.calling_environment);
 
     spdlog::info("{}", settings);
