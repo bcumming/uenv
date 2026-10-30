@@ -25,8 +25,8 @@ These items are open:
    slow writers and a check of the configs against the label, which the
    spike has. It also needs compaction, which it does not have: the history
    grows with no limit (C1 to C6).
-2. **Three rules are missing from the design** (M8 to M10). The spike
-   chose a rule for each.
+2. **Two rules are missing from the design** (M9 and M10). The spike chose
+   a rule for each.
 3. **Two parts are not tested:** the site rules for referrers end to end
    (D3), and the old test suites, which test v1 (T2).
 4. **Three registry observations** (R1 to R3) are evidence for the design,
@@ -137,7 +137,7 @@ design sections and their tests.
 
 | run                                                   | result                                          |
 | ----------------------------------------------------- | ----------------------------------------------- |
-| `build-v2/test/unit` (all, old and new)               | 5068 assertions pass                            |
+| `build-v2/test/unit` (all, old and new)               | 5072 assertions pass                            |
 | `build-v2/test/bats test/composable.bats`             | 33 of 33 pass, with real mounts and zot         |
 | new unit tests with AddressSanitizer                  | all pass, no ASan error                         |
 | registry tests on distribution `registry:2`           | 18 of 23 pass (see R3 in section 4)             |
@@ -203,12 +203,9 @@ The spike chose a rule for each. The design must state a rule.
 
 | id  | section                         | status     |
 | --- | ------------------------------- | ---------- |
-| M8  | "Variables in a value"          | spike rule |
 | M9  | "Rules" of mount points         | spike rule |
 | M10 | "A check for absolute paths"    | spike rule |
 
-- **M8. "Does not replace an invalid name"** does not say if the text stays.
-  The spike keeps it.
 - **M9. A mount point with `,` or `:`** cannot go into `UENV_MOUNT_LIST`. The
   spike refuses it.
 - **M10. "Contains its build mount point"** needs a rule for a prefix:
@@ -294,8 +291,8 @@ These are evidence for the design, not defects.
    configs against the label (C4). It also needs compaction, for example a
    snapshot event that holds the state, so that a first fill starts at the
    newest snapshot (C6). The spike did not test compaction.
-2. **1-composition:** a rule for each of M8 to M10. The rules of the spike
-   are a good start.
+2. **1-composition:** a rule for M9 and for M10. The rules of the spike are
+   a good start.
 
 ## 6. What the spike does not cover
 

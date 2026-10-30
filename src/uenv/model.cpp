@@ -481,8 +481,14 @@ std::string expand_view_value(std::string_view value,
         }
         auto name = value.substr(start + 3, end - start - 3);
         if (!valid_var_name(name)) {
-            report.warnings.push_back(fmt::format(
-                "'{}' is not a valid variable name: it is not replaced", name));
+            // keep the text, so that the user can find the wrong name in the
+            // environment. One warning for each name.
+            if (report.invalid_names.emplace(name).second) {
+                report.warnings.push_back(fmt::format(
+                    "'{}' in '${{@{}@}}' is not a valid variable name: the "
+                    "text is kept as it is",
+                    name, name));
+            }
             out.append(value.substr(start, end + 2 - start));
         } else if (auto v = before.get(name)) {
             out.append(*v);

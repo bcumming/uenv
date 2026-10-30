@@ -726,12 +726,21 @@ TEST_CASE("1/variables in a value", "[env]") {
         uenv::apply_patches(env, {a, b});
         REQUIRE(env.get("BIN") == "/r/bin");
     }
-    SECTION("an invalid name is not replaced") {
+    SECTION("an invalid name is kept as text, with one warning for each name") {
         envvars::patch p;
         p.update_scalar("X", "a${@not valid@}b");
-        auto rep = uenv::apply_patches(env, {p});
+        p.update_scalar("Y", "${@not valid@}:${@MY-ROOT@}:${@not valid@}");
+        envvars::patch q;
+        q.update_prefix_path("PATH", {envvars::update_kind::prepend,
+                                      {"${@MY-ROOT@}/bin"}});
+        auto rep = uenv::apply_patches(env, {p, q});
         REQUIRE(env.get("X") == "a${@not valid@}b");
-        REQUIRE(rep.warnings.size() == 1u);
+        REQUIRE(env.get("Y") == "${@not valid@}:${@MY-ROOT@}:${@not valid@}");
+        REQUIRE(env.get("PATH")->starts_with("${@MY-ROOT@}/bin"));
+        // two invalid names: two warnings
+        REQUIRE(rep.warnings.size() == 2u);
+        REQUIRE(rep.warnings[0].find("not valid") != std::string::npos);
+        REQUIRE(rep.warnings[1].find("MY-ROOT") != std::string::npos);
     }
     SECTION("a missing @} drops the rest of the value") {
         envvars::patch p;

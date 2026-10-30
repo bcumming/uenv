@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -184,6 +185,8 @@ envvars::patch session_patch(const concrete_image& c,
 struct apply_report {
     std::vector<std::string> warnings;
     std::vector<std::string> errors;
+    // the invalid names in ${@NAME@}: one warning for each name
+    std::set<std::string> invalid_names;
 };
 apply_report apply_patches(envvars::state& env,
                            const std::vector<envvars::patch>& patches);
