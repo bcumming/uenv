@@ -97,6 +97,10 @@ util::expected<object_record, std::string>
 compose(store& s, const nlohmann::json& spec, const label_keys& keys,
         std::vector<std::string>* warnings = nullptr);
 
+// check that each nested mount point is a directory in its parent layer, with
+// unsquashfs (1-composition.md, "Nested mount points")
+util::expected<void, std::string> check_nested_mounts(const composed_image& img);
+
 // the warnings of a composed image: an image view env that contains the
 // build mount point of a layer that the image moves
 std::vector<std::string> compose_warnings(const composed_image& img);

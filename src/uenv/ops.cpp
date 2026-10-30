@@ -18,6 +18,7 @@
 #include <uenv/store.h>
 #include <util/expected.h>
 #include <util/fs.h>
+#include <util/subprocess.h>
 
 namespace uenv {
 
@@ -319,6 +320,49 @@ find_unique(std::vector<store>& stores, const label_query& q,
     return found.front();
 }
 
+util::expected<void, std::string> check_nested_mounts(const composed_image& img) {
+    // the layers are sorted, so each parent comes before the layers in it
+    for (std::size_t i = 0; i < img.layers.size(); ++i) {
+        auto& child = img.layers[i];
+        const named_layer* parent = nullptr;
+        for (std::size_t j = 0; j < i; ++j) {
+            auto& p = img.layers[j];
+            if (child.mount.starts_with(p.mount + "/") &&
+                (!parent || p.mount.size() > parent->mount.size())) {
+                parent = &p;
+            }
+        }
+        if (!parent || !parent->layer.store.file) {
+            continue;
+        }
+        auto rel = child.mount.substr(parent->mount.size() + 1);
+        auto proc = util::run({"unsquashfs", "-l", "-d", "", "-no-progress",
+                               parent->layer.store.file->string(), rel});
+        if (!proc) {
+            spdlog::warn("unable to run unsquashfs: the mount point {} is not "
+                         "checked",
+                         child.mount);
+            continue;
+        }
+        bool found = false;
+        std::string line;
+        while (std::getline(proc->out.stream(), line)) {
+            if (line == "/" + rel) {
+                found = true;
+            }
+        }
+        proc->wait();
+        if (!found) {
+            return unexpected{fmt::format(
+                "the layer '{}' is mounted at {}, inside the layer '{}' at {}, "
+                "but '{}' has no directory {}",
+                child.alias, child.mount, parent->alias, parent->mount,
+                parent->alias, "/" + rel)};
+        }
+    }
+    return {};
+}
+
 std::vector<std::string> compose_warnings(const composed_image& img) {
     std::vector<std::string> out;
     for (auto& l : img.layers) {
@@ -436,6 +480,9 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
                                    ic->views, ic->default_view);
     if (!img) {
         return unexpected{img.error()};
+    }
+    if (auto r = check_nested_mounts(*img); !r) {
+        return unexpected{r.error()};
     }
     for (auto& w : compose_warnings(*img)) {
         spdlog::warn("{}", w);

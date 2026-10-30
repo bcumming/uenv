@@ -292,16 +292,27 @@ EOF
     assert_equal "$id1" "$(echo "$output" | grep -o 'id=[0-9a-f]*')"
 }
 
-@test "1/nested mount points: a missing directory fails at start" {
-    require_mount
+@test "1/nested mount points: a missing directory is found by compose" {
     add_fixtures
     cat > "$TMP/c.json" <<'EOF'
 {"name": "nest", "version": "1.0", "release": "v1", "meta": {}, "views": {},
  "layers": [{"from": "app/42.0:v1#app"},
             {"from": "+reltools", "mount": "/user-environment/nope"}]}
 EOF
-    uenv $R image compose "$TMP/c.json"
-    run uenv $R run nest -- true
+    # FINDING (nested-msg): without the check, compose accepts it, and the
+    # start fails with "the mount point is not a valid path", with no layer
+    # name. The fix checks it at compose, with unsquashfs.
+    run uenv $R image compose "$TMP/c.json"
+    assert_failure
+    assert_output --partial "the layer 'reltools' is mounted at /user-environment/nope"
+    assert_output --partial "'app' has no directory /nope"
+}
+
+@test "1/nested mount points: a merge at start with a missing directory" {
+    require_mount
+    add_fixtures
+    # a merge is not checked: the helper gives the error
+    run uenv $R run app/42.0,+reltools:/user-environment/nope -- true
     assert_failure
     echo "# message: $output" >&3
 }
