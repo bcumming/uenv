@@ -301,6 +301,13 @@ merge_items(std::vector<merge_item> items, digest_fn digest_of) {
     if (!result) {
         return result;
     }
+    // the name of the merge: the aliases in the order of the layers, so that
+    // the order of the list has no effect
+    std::vector<std::string> sorted;
+    for (auto& l : result->layers) {
+        sorted.push_back(l.alias);
+    }
+    result->config.name = fmt::format("{}", fmt::join(sorted, ","));
     if (all_digests && digest_of) {
         result->digest = digest_of(*result);
     }
