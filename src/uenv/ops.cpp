@@ -351,7 +351,12 @@ util::expected<void, std::string> check_nested_mounts(const composed_image& img)
                 found = true;
             }
         }
-        proc->wait();
+        if (proc->wait() != 0) {
+            spdlog::warn("unsquashfs could not read {}: the mount point {} is "
+                         "not checked",
+                         parent->layer.store.file->string(), child.mount);
+            continue;
+        }
         if (!found) {
             return unexpected{fmt::format(
                 "the layer '{}' is mounted at {}, inside the layer '{}' at {}, "

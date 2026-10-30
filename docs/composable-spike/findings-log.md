@@ -73,3 +73,22 @@ Confirmed in the CLI suite (composable.bats):
   digest of a linked squashfs by its inode.
 - F-site-policy-test (4 "Site rules for referrers"): rules only in
   /etc/uenv/config.toml: an end-to-end test needs root. Covered by unit tests.
+
+Registry compatibility (registry:2 via UENV_TEST_REGISTRY):
+- distribution 2.x: no referrers API (3 cases fail); tags/list ignores n/last
+  (one response with all tags); cross-repo mount works (mounted=2 for the
+  compose push). zot: HEAD finds blobs of other repos (dedupe).
+- F-catalogue-first-fill: first fill = N+1 requests (N events); 0.04 s for
+  50 events, 0.5 s for 400 (local zot). Refresh with no change: 1 request.
+  No compaction: N grows with each push/copy/delete forever.
+- F-first-event-wins: the find DB keys records by digest; a second add event
+  for one digest (for example a correction) is ignored.
+- test harness: zot started with unread stdout/stderr pipes blocks after
+  ~64 kB of output, holding a repository lock (hang at ~208 tags). Fixed in
+  v2_registry.cpp; main's oci_registry.cpp has the same pattern.
+- nested-mount check: unsquashfs -l with a path filter: ~2 ms on a squashfs
+  with 200 000 inodes.
+- Slurm: UENV_MOUNT_LIST entry ~149 chars (v1 and v2): 1024-byte buffer
+  holds 6 layers. Fixed (grow on ESPANK_NOSPACE); compile-only.
+- old suites: cli.bats 4/16, registry.bats 0/5, completion.bats 16/24 pass:
+  they test v1 formats, the v1 fixture and the listing service.
