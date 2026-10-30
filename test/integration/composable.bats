@@ -317,9 +317,14 @@ EOF
  "layers": [{"from": "+reltools", "mount": "/user-tools"}]}
 EOF
     run uenv $R image compose "$TMP/c.json"
-    # FINDING (image-env-stale): compose accepts it, with no warning
+    # FINDING (image-env-stale): compose accepts it. The fix adds a warning.
     assert_success
-    echo "# $output" >&3
+    assert_output --partial "sets MY_TOOLS_ROOT with the path /user-environment/tools"
+    # no warning when the path is correct
+    sed -i 's|"MY_TOOLS_ROOT": "/user-environment/tools"|"MY_TOOLS_ROOT": "/user-tools"|' "$TMP/c.json"
+    run uenv $R image compose "$TMP/c.json"
+    refute_output --partial "warning"
+
 }
 
 @test "6/a squashfs file: start it directly" {

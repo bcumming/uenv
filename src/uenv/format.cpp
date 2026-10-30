@@ -521,21 +521,46 @@ util::expected<image_config, error> parse_image_config(std::string_view body) {
     return c;
 }
 
+bool mentions_path(const std::string& s, const std::string& path) {
+    auto pos = s.find(path);
+    while (pos != std::string::npos) {
+        auto end = pos + path.size();
+        if (end == s.size() || s[end] == '/' || s[end] == ':' ||
+            !(std::isalnum(static_cast<unsigned char>(s[end])) ||
+              s[end] == '_' || s[end] == '-' || s[end] == '.')) {
+            return true;
+        }
+        pos = s.find(path, pos + 1);
+    }
+    return false;
+}
+
+std::vector<std::string> patch_mentions(const envvars::patch& p,
+                                        const std::string& path) {
+    std::vector<std::string> out;
+    for (auto& [var, s] : p.scalars()) {
+        if (s.value && mentions_path(*s.value, path)) {
+            out.push_back(var);
+        }
+    }
+    for (auto& [var, pp] : p.prefix_paths()) {
+        for (auto& u : pp.updates()) {
+            for (auto& v : u.values) {
+                if (mentions_path(v, path)) {
+                    out.push_back(var);
+                }
+            }
+        }
+    }
+    return out;
+}
+
 util::expected<void, error> check_relocatable(const layer_config& c) {
     if (!c.relocatable) {
         return {};
     }
     auto contains_mount = [&](const std::string& s) {
-        auto pos = s.find(c.mount);
-        while (pos != std::string::npos) {
-            auto end = pos + c.mount.size();
-            if (end == s.size() || s[end] == '/' || s[end] == ':' ||
-                !std::isalnum(static_cast<unsigned char>(s[end]))) {
-                return true;
-            }
-            pos = s.find(c.mount, pos + 1);
-        }
-        return false;
+        return mentions_path(s, c.mount);
     };
     for (auto& [name, v] : c.views) {
         for (auto& [var, s] : v.env.scalars()) {

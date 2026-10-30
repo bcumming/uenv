@@ -319,8 +319,37 @@ find_unique(std::vector<store>& stores, const label_query& q,
     return found.front();
 }
 
+std::vector<std::string> compose_warnings(const composed_image& img) {
+    std::vector<std::string> out;
+    for (auto& l : img.layers) {
+        if (l.mount == l.layer.mount) {
+            continue;
+        }
+        // the old path can be the mount point of a different layer
+        bool used = false;
+        for (auto& o : img.layers) {
+            if (o.mount == l.layer.mount) {
+                used = true;
+            }
+        }
+        if (used) {
+            continue;
+        }
+        for (auto& [name, v] : img.views) {
+            for (auto& var : format::patch_mentions(v.env, l.layer.mount)) {
+                out.push_back(fmt::format(
+                    "the image view '{}' sets {} with the path {}, but the "
+                    "layer '{}' is now at {}",
+                    name, var, l.layer.mount, l.alias, l.mount));
+            }
+        }
+    }
+    return out;
+}
+
 util::expected<object_record, std::string>
-compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
+compose(store& s, const nlohmann::json& spec, const label_keys& keys,
+        std::vector<std::string>* warnings) {
     if (!spec.is_object()) {
         return unexpected{std::string{"the compose file must be an object"}};
     }
@@ -407,6 +436,12 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
                                    ic->views, ic->default_view);
     if (!img) {
         return unexpected{img.error()};
+    }
+    for (auto& w : compose_warnings(*img)) {
+        spdlog::warn("{}", w);
+        if (warnings) {
+            warnings->push_back(w);
+        }
     }
     return write_image(s, *img);
 }

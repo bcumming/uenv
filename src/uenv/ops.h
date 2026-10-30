@@ -94,7 +94,12 @@ find_unique(std::vector<store>& stores, const label_query& q,
 // compose an image from a compose file (JSON): the image config, plus
 // "layers": [{"alias", "mount", "from"}]. Each layer must be in the store.
 util::expected<object_record, std::string>
-compose(store& s, const nlohmann::json& spec, const label_keys& keys);
+compose(store& s, const nlohmann::json& spec, const label_keys& keys,
+        std::vector<std::string>* warnings = nullptr);
+
+// the warnings of a composed image: an image view env that contains the
+// build mount point of a layer that the image moves
+std::vector<std::string> compose_warnings(const composed_image& img);
 
 // resolve a list for start/run, and merge it into one composed_image
 util::expected<composed_image, std::string>

@@ -89,6 +89,14 @@ util::expected<image_config, error> parse_image_config(std::string_view body);
 // check a relocatable layer config: no view contains the build mount point
 util::expected<void, error> check_relocatable(const layer_config& c);
 
+// true if `value` contains the path `path`, followed by the end of the value
+// or by a character that cannot continue a file name component
+bool mentions_path(const std::string& value, const std::string& path);
+
+// the variables of a patch that contain `path`
+std::vector<std::string> patch_mentions(const envvars::patch& p,
+                                        const std::string& path);
+
 //
 // manifests and the index
 //
