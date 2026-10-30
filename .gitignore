@@ -17,7 +17,7 @@ review.md
 packaging/*.log
 packaging/*.rpm
 install
-build
+build*
 pyenv
 
 task.md

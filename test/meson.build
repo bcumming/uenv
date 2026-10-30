@@ -96,6 +96,8 @@ setup_suite = custom_target (
 )
 
 unit_src = [
+    'unit/v2_model.cpp',
+    'unit/v2_store.cpp',
         'unit/archive.cpp',
         'unit/argparse.cpp',
         'unit/cgroup.cpp',
