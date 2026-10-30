@@ -1115,6 +1115,35 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
     if (!img) {
         return unexpected{img.error()};
     }
+    // the catalogue is a copy of the configs, not checked against them: check
+    // the configs against the label before the download
+    if (a.label) {
+        auto q = parse_label_query(*a.label, ctx.keys, ctx.default_system);
+        if (q && !q->id) {
+            const auto& c = img->config;
+            std::vector<std::string> bad;
+            if (q->name && *q->name != c.name) {
+                bad.push_back("name " + c.name);
+            }
+            if (q->version && *q->version != c.version) {
+                bad.push_back("version " + c.version);
+            }
+            if (q->release && *q->release != c.release) {
+                bad.push_back("release " + c.release);
+            }
+            for (auto& [k, v] : q->meta) {
+                if (auto it = c.meta.find(k); it != c.meta.end() && it->second != v) {
+                    bad.push_back(fmt::format("{} {}", k, it->second));
+                }
+            }
+            if (!bad.empty()) {
+                return unexpected{fmt::format(
+                    "the catalogue gives {} for '{}', but its config has {}: "
+                    "the catalogue is not correct",
+                    loc->digest.string(), *a.label, fmt::join(bad, ", "))};
+            }
+        }
+    }
     test_fault("pull-after-configs");
     // 3. each squashfs that is not in the store
     for (auto& l : img->layers) {

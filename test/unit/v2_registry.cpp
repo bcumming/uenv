@@ -741,3 +741,25 @@ TEST_CASE("4/delete and registry GC keep the layers of other images",
     auto s2 = new_store();
     REQUIRE(reg::pull(s2, addr(*e, "prgenv-gnu@santis"), e->ctx));
 }
+
+TEST_CASE("5/catalogue: an event that does not match the configs",
+          "[registry][catalogue]") {
+    REQUIRE_ZOT();
+    auto e = make_env(shared_zot().base);
+    auto t = *reg::resolve_target(e->cfg, {});
+    auto s = new_store();
+    auto app = add_image(s, prgenv());
+    auto r = reg::push(s, app.digest, t, e->ctx);
+    REQUIRE(r);
+    // a wrong event: the label tools/1.0:v1 for the digest of prgenv-gnu
+    auto cat = *reg::catalogue::open(t, e->ctx);
+    auto rec = app;
+    rec.cfg.name = "tools";
+    REQUIRE(cat.append({"add", r->repository, r->tag, rec}));
+    auto s2 = new_store();
+    auto p = reg::pull(s2, addr(*e, "tools/1.0:v1"), e->ctx);
+    // FINDING (catalogue-trust): with no check, the pull gives prgenv-gnu
+    REQUIRE(!p);
+    REQUIRE(p.error().find("catalogue is not correct") != std::string::npos);
+    REQUIRE(e->ctx.st.downloaded == 0u);
+}
