@@ -94,7 +94,13 @@ struct zot_instance {
                              (state / "registry").string(), port,
                              (state / "zot.log").string());
         }
-        auto p = util::run({zot, "serve", cfg.string()});
+        // zot writes to stdout and stderr: send them to a file. A pipe that
+        // no one reads fills up after some 64 kB, and zot then blocks in a
+        // request while it holds the lock of a repository
+        auto p = util::run(
+            {"/bin/sh", "-c",
+             fmt::format("exec '{}' serve '{}' > '{}' 2>&1", zot, cfg.string(),
+                         (state / "zot.out").string())});
         if (!p) {
             return; // no zot binary / failed to launch -> tests skip
         }
