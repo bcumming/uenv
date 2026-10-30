@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <oci/digest.h>
+#include <uenv/view.h>
 #include <util/envvars.h>
 #include <util/expected.h>
 
@@ -71,25 +72,36 @@ struct named_layer {
 
 struct image_view {
     std::string description;
-    std::vector<std::string> include; // "alias:view"
+    std::vector<layer_view_ref> include;
     envvars::patch env;
+};
+
+// what a composed_image was made from
+enum class image_kind {
+    // an image: read from a repository or a registry, or made by compose
+    image,
+    // the raise of one layer, or of a squashfs file
+    layer,
+    // the result of `uenv run/start a,b` (1-composition.md, "Runtime
+    // merge"). It has no identity, and uenv never stores it.
+    runtime_merge,
 };
 
 struct composed_image {
     // the digest of the top-level object: an index, or the layer manifest of
-    // a raised layer. Absent for a squashfs file, or a merge with one.
+    // a raised layer. Absent for a squashfs file and for a runtime merge.
     std::optional<oci::digest> digest;
-    // true if the top-level object is a layer (the result of a raise)
-    bool is_layer = false;
+    image_kind kind = image_kind::image;
 
     // sorted by mount point
     std::vector<named_layer> layers;
 
     uenv::config config;
-    std::map<std::string, image_view> views;
+    std::map<image_view_name, image_view> views;
     // the views to load if the user names none.
-    // A stored image has at most one. A merged list has one for each item.
-    std::vector<std::string> default_views;
+    // A stored image has at most one. A runtime merge has the default view of
+    // each item, in the order of the list.
+    std::vector<image_view_name> default_views;
 };
 
 // the result of concretise: never stored, never an input to compose
@@ -98,6 +110,8 @@ struct concrete_image {
     std::vector<std::pair<std::filesystem::path, std::string>> mounts;
     // applied in order, one at a time
     std::vector<envvars::patch> patches;
+    // the views that the patches load, in order
+    std::vector<view_description> views;
 };
 
 using model_error = std::string;
@@ -119,35 +133,42 @@ util::expected<composed_image, model_error>
 raise_layer(const layer& l, std::optional<std::string> mount, bool force,
             std::optional<std::string> alias = std::nullopt);
 
-// one item of a list given to start/run: [alias=]label[:mount]
-struct merge_item {
+// one item of the list given to uenv run/start or srun --uenv:
+// [alias=]label[:mount]
+struct runtime_merge_item {
     std::optional<std::string> alias;
     std::optional<std::string> mount;
-    // the image, a raised layer, or a raised squashfs file
+    // an image, a raised layer, or a raised squashfs file
     composed_image image;
     // true if the item is a layer or a squashfs file (it can move)
     bool movable = false;
     bool force = false;
 };
 
-// Merge a list of items into one composed_image ("Merge a list at start").
-// The digest is the identity of the image that uenv would write for the
-// result, calculated by `digest_of`, or absent if an item has no digest.
-using digest_fn = std::function<std::optional<oci::digest>(const composed_image&)>;
+// The runtime merge: make one composed_image from the items of the list
+// (1-composition.md, "Runtime merge"). The result has the kind
+// runtime_merge, no digest, and the image views of each item, named by the
+// alias of the item.
 util::expected<composed_image, model_error>
-merge_items(std::vector<merge_item> items, digest_fn digest_of = {});
+runtime_merge(std::vector<runtime_merge_item> items);
 
 // Replace each @uenv-root@ in a patch with the mount point
 envvars::patch replace_root(const envvars::patch& p, const std::string& mount);
 
 // Concretise: the mount list, and the list of patches for the views.
-// views: the names that the user gives (empty: the default views)
+// views: the views that the user gives. If there are none, concretise loads
+// the default views of the image, unless use_default_views is false.
 util::expected<concrete_image, model_error>
-concretise(const composed_image& img, const std::vector<std::string>& views);
+concretise(const composed_image& img,
+           const std::vector<view_description>& views,
+           bool use_default_views = true);
+
+// "alias:view" or "view": the form of a view in --view and UENV_VIEW
+std::string view_string(const view_description& v);
 
 // The session variables: UENV_VIEW, UENV_MOUNT_LIST
 envvars::patch session_patch(const concrete_image& c,
-                             const std::vector<std::string>& views);
+                             const std::vector<view_description>& views);
 
 // Apply a list of patches to an environment, one at a time
 // (1-composition.md, "Load more than one view").

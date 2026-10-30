@@ -1,7 +1,7 @@
 #pragma once
 
 // Local operations on images and layers: add (promote), compose, the parse
-// and resolution of labels, and the merge of a list at start.
+// and resolution of labels, and the runtime merge of the list of run/start.
 
 #include <filesystem>
 #include <map>
@@ -99,17 +99,25 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
 
 // check that each nested mount point is a directory in its parent layer, with
 // unsquashfs (1-composition.md, "Nested mount points")
+//
+// This is the heavy check, for unprivileged code only: compose, and the
+// runtime merge in prepare_session (uenv run, uenv start, and the local
+// context of the Slurm plugin). It runs an external program, and it reads the
+// contents of a file system image that the user names.
+//
+// NEVER call it from a privileged path: the setuid squashfs-mount helper, or
+// the remote context of the Slurm plugin, which runs as root. As root, it is
+// an oracle for the contents of files that the user cannot read. Those paths
+// use parse_and_validate_mounts (mount.h), the light check that is safe in
+// privileged code. Do not "consolidate" the two checks into one.
 util::expected<void, std::string> check_nested_mounts(const composed_image& img);
 
 // the warnings of a composed image: an image view env that contains the
 // build mount point of a layer that the image moves
 std::vector<std::string> compose_warnings(const composed_image& img);
 
-// the identity of a merged list: the image that uenv would write, with no
-// default view
-std::optional<oci::digest> merged_digest(const composed_image& img);
-
-// resolve a list for start/run, and merge it into one composed_image
+// resolve the list of uenv run/start or srun --uenv, and make one
+// composed_image: the item itself for one item, else a runtime merge
 util::expected<composed_image, std::string>
 resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
               bool force);

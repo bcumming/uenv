@@ -157,6 +157,51 @@ parse_view_description(lex::lexer& L) {
     return view_description{{}, name1};
 }
 
+util::expected<view_description, parse_error>
+parse_view_description(const std::string& in) {
+    auto L = lex::lexer(in);
+    view_description result;
+    PARSE(L, view_description, result);
+    if (const auto t = L.peek(); t != lex::tok::end) {
+        return util::unexpected(parse_error{
+            L.string(), fmt::format("unexpected symbol '{}'", t.spelling), t});
+    }
+    return result;
+}
+
+util::expected<layer_view_ref, parse_error>
+parse_layer_view_ref(const std::string& in) {
+    auto v = parse_view_description(in);
+    if (!v) {
+        return util::unexpected(v.error());
+    }
+    if (!v->uenv) {
+        return util::unexpected(parse_error{
+            in, "expected a layer view as alias:view", lex::token{}});
+    }
+    return layer_view_ref{.alias = *v->uenv, .view = v->name};
+}
+
+util::expected<std::string, parse_error> parse_view_name(const std::string& in) {
+    auto v = parse_view_description(in);
+    if (!v) {
+        return util::unexpected(v.error());
+    }
+    if (v->uenv) {
+        return util::unexpected(parse_error{
+            in, "the name of a view cannot contain ':'", lex::token{}});
+    }
+    return v->name;
+}
+
+std::string format_as(const layer_view_ref& r) {
+    return fmt::format("{}:{}", r.alias, r.view);
+}
+
+std::string format_as(const image_view_name& n) {
+    return n.item ? fmt::format("{}:{}", *n.item, n.name) : n.name;
+}
+
 // env_view_description is parsed from the UENV_VIEW environemnt variable
 // which has the form:
 // mount:uenv-name:view-name

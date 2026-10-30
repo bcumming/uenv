@@ -273,7 +273,7 @@ add_squashfs(store& s, const fs::path& sqfs, const format::layer_config& cfg,
     if (!img) {
         return unexpected{img.error()};
     }
-    img->is_layer = false;
+    img->kind = uenv::image_kind::image;
     for (auto& [k, v] : image_meta) {
         img->config.meta[k] = v;
     }
@@ -498,20 +498,13 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
     return write_image(s, *img);
 }
 
-std::optional<oci::digest> merged_digest(const composed_image& img) {
-    // the default views of a merge are a choice at start, one for each item,
-    // and an image config holds only one: the identity leaves them out
-    auto copy = img;
-    copy.default_views.clear();
-    return format::image_digest(copy);
-}
-
 util::expected<composed_image, std::string>
 resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
               bool force) {
-    std::vector<merge_item> merge;
+    std::vector<runtime_merge_item> merge;
     for (auto& item : items) {
-        merge_item m{.alias = item.alias, .mount = item.mount, .force = force};
+        runtime_merge_item m{
+            .alias = item.alias, .mount = item.mount, .force = force};
         if (item.file) {
             auto img = raise_from_squashfs(*item.file, item.mount);
             if (!img) {
@@ -545,7 +538,7 @@ resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
         }
         merge.push_back(std::move(m));
     }
-    return merge_items(std::move(merge), merged_digest);
+    return runtime_merge(std::move(merge));
 }
 
 } // namespace uenv

@@ -2,8 +2,6 @@
 
 // The stored format of layers and images (design/2-oci-layout.md).
 
-#include <functional>
-#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,7 +16,8 @@
 
 namespace uenv::format {
 
-inline constexpr std::string_view mt_squashfs = "application/vnd.uenv.squashfs.v1";
+inline constexpr std::string_view mt_squashfs =
+    "application/vnd.uenv.squashfs.v1";
 inline constexpr std::string_view mt_layer_config =
     "application/vnd.uenv.layer-config.v1+json";
 inline constexpr std::string_view at_layer = "application/vnd.uenv.layer.v1";
@@ -64,8 +63,9 @@ util::expected<void, error> check_media_type(std::string_view found,
 //
 
 nlohmann::json env_to_json(const envvars::patch& p);
-util::expected<envvars::patch, error> env_from_json(const nlohmann::json& j,
-                                                    std::vector<std::string>* warnings = nullptr);
+util::expected<envvars::patch, error>
+env_from_json(const nlohmann::json& j,
+              std::vector<std::string>* warnings = nullptr);
 
 struct layer_config {
     config shared;
@@ -126,7 +126,8 @@ util::expected<blob, error> make_wrapper_manifest(const blob& image_config);
 util::expected<blob, error> make_index(const blob& wrapper,
                                        std::vector<index_entry> layers);
 
-util::expected<layer_manifest, error> parse_layer_manifest(std::string_view body);
+util::expected<layer_manifest, error>
+parse_layer_manifest(std::string_view body);
 util::expected<wrapper_manifest, error>
 parse_wrapper_manifest(std::string_view body);
 util::expected<image_index, error> parse_index(std::string_view body);
@@ -165,7 +166,8 @@ struct image_objects {
     blob index;
 };
 image_config image_config_of(const composed_image& img);
-util::expected<image_objects, error> make_image_objects(const composed_image& img);
+util::expected<image_objects, error>
+make_image_objects(const composed_image& img);
 
 struct layer_objects {
     blob config;

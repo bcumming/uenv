@@ -804,7 +804,7 @@ store::load(const oci::digest& d) const {
 }
 
 object_record record_of(const composed_image& img, std::uint64_t size) {
-    object_record r{.kind = img.is_layer ? format::object_kind::layer
+    object_record r{.kind = img.kind == uenv::image_kind::layer ? format::object_kind::layer
                                          : format::object_kind::image,
                     .digest = *img.digest};
     r.id = format::short_id(*img.digest);
@@ -821,7 +821,7 @@ object_record record_of(const composed_image& img, std::uint64_t size) {
                                      .squashfs = *l.layer.store.digest,
                                      .squashfs_size = l.layer.store.size});
     }
-    if (img.is_layer) {
+    if (img.kind == uenv::image_kind::layer) {
         auto& l = img.layers.front().layer;
         r.mount = l.mount;
         r.relocatable = l.relocatable;
@@ -842,7 +842,7 @@ store::record(const oci::digest& top, bool standalone_layer) {
     }
     // the blobs that the object reaches
     std::vector<oci::digest> blobs{top};
-    if (!img->is_layer) {
+    if (img->kind != uenv::image_kind::layer) {
         auto idx = format::parse_index(*read_blob(top));
         blobs.push_back(idx->wrapper.digest);
         auto w = format::parse_wrapper_manifest(*read_blob(idx->wrapper.digest));
@@ -876,7 +876,7 @@ store::record(const oci::digest& top, bool standalone_layer) {
         unique.push_back(b);
     }
     auto r = record_of(*img, size);
-    r.standalone = standalone_layer && img->is_layer;
+    r.standalone = standalone_layer && img->kind == uenv::image_kind::layer;
     test_fault("record-before-db");
     if (auto x = db_.add(r, unique); !x) {
         return unexpected{x.error()};

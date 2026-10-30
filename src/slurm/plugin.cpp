@@ -434,7 +434,8 @@ int init_post_opt_local_allocator(spank_t sp [[maybe_unused]]) {
             return -ESPANK_ERROR;
         }
 
-        // the composed model: resolve the list, merge it, concretise it,
+        // the composed model: resolve the list, make a runtime merge of it,
+        // concretise it,
         // and apply the patches in order (1-composition.md)
         auto session = uenv::prepare_session(
             args.uenv_description.value(), args.view_description,

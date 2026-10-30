@@ -38,16 +38,6 @@ bool valid_var_name(std::string_view name) {
     });
 }
 
-// split "alias:view" at the first ':'
-std::optional<std::pair<std::string, std::string>>
-split_qualified(const std::string& s) {
-    auto pos = s.find(':');
-    if (pos == std::string::npos || pos == 0 || pos + 1 == s.size()) {
-        return std::nullopt;
-    }
-    return std::make_pair(s.substr(0, pos), s.substr(pos + 1));
-}
-
 const named_layer* find_alias(const std::vector<named_layer>& layers,
                               const std::string& alias) {
     for (auto& l : layers) {
@@ -61,8 +51,8 @@ const named_layer* find_alias(const std::vector<named_layer>& layers,
 util::expected<composed_image, model_error>
 make_composed_image_impl(std::optional<oci::digest> digest, config cfg,
                          std::vector<named_layer> layers,
-                         std::map<std::string, image_view> views,
-                         std::vector<std::string> default_views,
+                         std::map<image_view_name, image_view> views,
+                         std::vector<image_view_name> default_views,
                          bool allow_forced_moves) {
     using util::unexpected;
     if (layers.empty()) {
@@ -95,28 +85,19 @@ make_composed_image_impl(std::optional<oci::digest> digest, config cfg,
         }
     }
     for (auto& [name, v] : views) {
-        if (name.empty()) {
-            return unexpected{model_error{"an image view has an empty name"}};
-        }
         for (auto& inc : v.include) {
-            auto q = split_qualified(inc);
-            if (!q) {
-                return unexpected{fmt::format(
-                    "image view '{}': '{}' is not of the form alias:view", name,
-                    inc)};
-            }
-            auto l = find_alias(layers, q->first);
+            auto l = find_alias(layers, inc.alias);
             if (!l) {
                 return unexpected{
                     fmt::format("image view '{}' includes '{}', but the image "
                                 "has no layer with the alias '{}'",
-                                name, inc, q->first)};
+                                name, inc, inc.alias)};
             }
-            if (!l->layer.views.contains(q->second)) {
+            if (!l->layer.views.contains(inc.view)) {
                 return unexpected{
                     fmt::format("image view '{}' includes '{}', but the layer "
                                 "'{}' has no view '{}'",
-                                name, inc, q->first, q->second)};
+                                name, inc, inc.alias, inc.view)};
             }
         }
     }
@@ -130,7 +111,7 @@ make_composed_image_impl(std::optional<oci::digest> digest, config cfg,
     std::sort(layers.begin(), layers.end(),
               [](auto& a, auto& b) { return a.mount < b.mount; });
     return composed_image{.digest = std::move(digest),
-                          .is_layer = false,
+                          .kind = image_kind::image,
                           .layers = std::move(layers),
                           .config = std::move(cfg),
                           .views = std::move(views),
@@ -167,12 +148,17 @@ make_composed_image(std::optional<oci::digest> digest, config cfg,
                     std::vector<named_layer> layers,
                     std::map<std::string, image_view> views,
                     std::optional<std::string> default_view) {
-    std::vector<std::string> defaults;
+    // a stored image names its views with no alias
+    std::map<image_view_name, image_view> named;
+    for (auto& [name, v] : views) {
+        named.emplace(image_view_name{.name = name}, std::move(v));
+    }
+    std::vector<image_view_name> defaults;
     if (default_view) {
-        defaults.push_back(*default_view);
+        defaults.push_back({.name = *default_view});
     }
     return make_composed_image_impl(std::move(digest), std::move(cfg),
-                                    std::move(layers), std::move(views),
+                                    std::move(layers), std::move(named),
                                     std::move(defaults), false);
 }
 
@@ -194,25 +180,44 @@ raise_layer(const layer& l, std::optional<std::string> mount, bool force,
         forced = true;
     }
     const std::string a = alias.value_or(l.config.name);
-    std::map<std::string, image_view> views;
+    std::map<image_view_name, image_view> views;
     for (auto& [name, _] : l.views) {
-        views[name] = image_view{.include = {a + ":" + name}};
+        views[{.name = name}] =
+            image_view{.include = {{.alias = a, .view = name}}};
     }
-    std::vector<std::string> defaults;
+    std::vector<image_view_name> defaults;
     if (l.default_view) {
-        defaults.push_back(*l.default_view);
+        defaults.push_back({.name = *l.default_view});
     }
     auto img = make_composed_image_impl(
         l.digest, l.config, {named_layer{.alias = a, .mount = m, .layer = l}},
         std::move(views), std::move(defaults), forced);
     if (img) {
-        img->is_layer = true;
+        img->kind = uenv::image_kind::layer;
     }
     return img;
 }
 
+namespace {
+
+// the layer of an earlier item that is the same layer at the same mount point
+const named_layer* find_same(const std::vector<named_layer>& layers,
+                             const named_layer& l) {
+    if (!l.layer.digest) {
+        return nullptr;
+    }
+    for (auto& o : layers) {
+        if (o.layer.digest == l.layer.digest && o.mount == l.mount) {
+            return &o;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
 util::expected<composed_image, model_error>
-merge_items(std::vector<merge_item> items, digest_fn digest_of) {
+runtime_merge(std::vector<runtime_merge_item> items) {
     using util::unexpected;
     if (items.empty()) {
         return unexpected{model_error{"no image to start"}};
@@ -223,93 +228,102 @@ merge_items(std::vector<merge_item> items, digest_fn digest_of) {
     }
 
     std::vector<named_layer> layers;
-    std::map<std::string, image_view> views;
-    std::vector<std::string> defaults;
+    std::map<image_view_name, image_view> views;
+    std::vector<image_view_name> defaults;
     std::vector<std::string> names;
-    bool all_digests = true;
     bool forced = false;
 
     for (auto& item : items) {
         auto& img = item.image;
-        if (img.layers.size() != 1u) {
+        const std::string item_alias = item.alias.value_or(img.config.name);
+        if (std::find(names.begin(), names.end(), item_alias) != names.end()) {
             return unexpected{fmt::format(
-                "the image {} has {} layers: an image with more than one layer "
-                "cannot be merged with other items. Write an image config "
-                "that contains all the layers, and compose it.",
-                img.config.name, img.layers.size())};
+                "two items of the list have the name '{}': give one of them "
+                "an alias, for example x={}",
+                item_alias, img.config.name)};
         }
-        auto nl = img.layers.front();
-        const std::string old_alias = nl.alias;
-        const std::string alias = item.alias.value_or(img.config.name);
-        if (item.mount && *item.mount != nl.mount) {
-            if (!item.movable) {
-                return unexpected{fmt::format(
-                    "the image {} cannot move to {}: only a layer can be "
-                    "mounted at a different mount point. Give the layer "
-                    "with the layer marker '+' instead.",
-                    img.config.name, *item.mount)};
-            }
-            if (!nl.layer.relocatable) {
-                if (!item.force) {
-                    return unexpected{fmt::format(
-                        "the layer {} is not relocatable: it can only be "
-                        "mounted at {}. Use --force to mount it at {}",
-                        nl.layer.config.name, nl.layer.mount, *item.mount)};
+        names.push_back(item_alias);
+        if (item.mount && img.layers.size() != 1u) {
+            return unexpected{fmt::format(
+                "the image {} has {} layers: it cannot move to {}",
+                img.config.name, img.layers.size(), *item.mount)};
+        }
+
+        // the alias of each layer of the item, in the runtime merge
+        std::map<std::string, std::string> rename;
+        for (auto nl : img.layers) {
+            const std::string source = nl.alias;
+            if (img.layers.size() == 1u) {
+                // the one layer of an item takes the alias of the item
+                nl.alias = item_alias;
+                if (item.mount && *item.mount != nl.mount) {
+                    if (!item.movable) {
+                        return unexpected{fmt::format(
+                            "the image {} cannot move to {}: only a layer can "
+                            "be mounted at a different mount point. Give the "
+                            "layer with the layer marker '+' instead.",
+                            img.config.name, *item.mount)};
+                    }
+                    if (!nl.layer.relocatable) {
+                        if (!item.force) {
+                            return unexpected{fmt::format(
+                                "the layer {} is not relocatable: it can only "
+                                "be mounted at {}. Use --force to mount it at "
+                                "{}",
+                                nl.layer.config.name, nl.layer.mount,
+                                *item.mount)};
+                        }
+                        spdlog::warn("the layer {} is not relocatable: "
+                                     "mounting it at {}. Its views can have "
+                                     "wrong paths.",
+                                     nl.layer.config.name, *item.mount);
+                    }
+                    nl.mount = *item.mount;
                 }
-                spdlog::warn("the layer {} is not relocatable: mounting it "
-                             "at {}. Its views can have wrong paths.",
-                             nl.layer.config.name, *item.mount);
+            }
+            // a layer that an earlier item has at the same mount point is
+            // mounted once
+            if (auto same = find_same(layers, nl)) {
+                rename[source] = same->alias;
+                continue;
+            }
+            // a clash of aliases between items: rename the later layer
+            if (find_alias(layers, nl.alias)) {
+                const auto renamed = fmt::format("{}.{}", item_alias, nl.alias);
+                spdlog::warn("the layer '{}' of {} has the alias of a layer of "
+                             "an earlier item: it is renamed '{}'",
+                             nl.alias, item_alias, renamed);
+                nl.alias = renamed;
+            }
+            if (!nl.layer.relocatable && nl.mount != nl.layer.mount) {
                 forced = true;
             }
-            nl.mount = *item.mount;
+            rename[source] = nl.alias;
+            layers.push_back(std::move(nl));
         }
-        if (!nl.layer.relocatable && nl.mount != nl.layer.mount) {
-            forced = true;
-        }
-        nl.alias = alias;
-        if (!nl.layer.digest) {
-            all_digests = false;
-        }
-        names.push_back(alias);
 
+        // the image views of the item, named by the alias of the item. Each
+        // include refers to a layer of the item (make_composed_image checks
+        // it), so the rename has an entry for it.
         for (auto& [vname, v] : img.views) {
             image_view nv = v;
             for (auto& inc : nv.include) {
-                auto q = split_qualified(inc);
-                if (q && q->first == old_alias) {
-                    inc = alias + ":" + q->second;
-                }
+                inc.alias = rename.at(inc.alias);
             }
-            const auto key = alias + ":" + vname;
-            if (views.contains(key)) {
-                return unexpected{fmt::format(
-                    "two items give the view '{}': give one item an alias",
-                    key)};
-            }
-            views[key] = std::move(nv);
+            views[{.item = item_alias, .name = vname.name}] = std::move(nv);
         }
         for (auto& d : img.default_views) {
-            defaults.push_back(alias + ":" + d);
+            defaults.push_back({.item = item_alias, .name = d.name});
         }
-        layers.push_back(std::move(nl));
     }
 
+    // the name is only for display: a runtime merge is never stored
     config cfg{.name = fmt::format("{}", fmt::join(names, ","))};
     auto result =
         make_composed_image_impl(std::nullopt, std::move(cfg), std::move(layers),
                                  std::move(views), std::move(defaults), forced);
-    if (!result) {
-        return result;
-    }
-    // the name of the merge: the aliases in the order of the layers, so that
-    // the order of the list has no effect
-    std::vector<std::string> sorted;
-    for (auto& l : result->layers) {
-        sorted.push_back(l.alias);
-    }
-    result->config.name = fmt::format("{}", fmt::join(sorted, ","));
-    if (all_digests && digest_of) {
-        result->digest = digest_of(*result);
+    if (result) {
+        result->kind = image_kind::runtime_merge;
     }
     return result;
 }
@@ -336,7 +350,9 @@ envvars::patch replace_root(const envvars::patch& p, const std::string& mount) {
 }
 
 util::expected<concrete_image, model_error>
-concretise(const composed_image& img, const std::vector<std::string>& views) {
+concretise(const composed_image& img,
+           const std::vector<view_description>& views,
+           bool use_default_views) {
     using util::unexpected;
     concrete_image result;
 
@@ -361,44 +377,72 @@ concretise(const composed_image& img, const std::vector<std::string>& views) {
     }
 
     // 3. find the views
-    const auto& names = views.empty() ? img.default_views : views;
+    result.views = views;
+    if (views.empty() && use_default_views) {
+        for (auto& d : img.default_views) {
+            result.views.push_back({.uenv = d.item, .name = d.name});
+        }
+    }
 
-    // 4. the list of patches
-    for (auto& name : names) {
-        if (auto it = img.views.find(name); it != img.views.end()) {
+    // 4. the list of patches. A name is an image view first, else a layer
+    // view: in a runtime merge, the image view `a:v` of an item wraps the
+    // layer view `a:v`, and the image view can add an env patch.
+    for (auto& v : result.views) {
+        auto it = img.views.find({.item = v.uenv, .name = v.name});
+        // in a runtime merge, a name with no item is the view of the one
+        // item that has a view of that name
+        if (it == img.views.end() && !v.uenv) {
+            std::vector<std::string> found;
+            for (auto i = img.views.begin(); i != img.views.end(); ++i) {
+                if (i->first.name == v.name) {
+                    it = i;
+                    found.push_back(format_as(i->first));
+                }
+            }
+            if (found.size() > 1u) {
+                return unexpected{fmt::format(
+                    "more than one item has the view '{}': give one of {}",
+                    v.name, fmt::join(found, ", "))};
+            }
+        }
+        if (it != img.views.end()) {
             for (auto& inc : it->second.include) {
-                auto q = split_qualified(inc);
-                result.patches.push_back(layer_views.at(q->first).at(q->second));
+                result.patches.push_back(layer_views.at(inc.alias).at(inc.view));
             }
             result.patches.push_back(it->second.env);
             continue;
         }
-        if (auto q = split_qualified(name)) {
-            if (auto l = layer_views.find(q->first); l != layer_views.end()) {
-                if (auto v = l->second.find(q->second); v != l->second.end()) {
-                    result.patches.push_back(v->second);
+        if (v.uenv) {
+            if (auto l = layer_views.find(*v.uenv); l != layer_views.end()) {
+                if (auto lv = l->second.find(v.name); lv != l->second.end()) {
+                    result.patches.push_back(lv->second);
                     continue;
                 }
             }
         }
         std::vector<std::string> available;
         for (auto& [k, _] : img.views) {
-            available.push_back(k);
+            available.push_back(format_as(k));
         }
         for (auto& l : img.layers) {
             for (auto& [k, _] : l.layer.views) {
-                available.push_back(l.alias + ":" + k);
+                available.push_back(
+                    format_as(layer_view_ref{.alias = l.alias, .view = k}));
             }
         }
         return unexpected{
             fmt::format("'{}' is not a view of the image. The views are: {}",
-                        name, fmt::join(available, ", "))};
+                        view_string(v), fmt::join(available, ", "))};
     }
     return result;
 }
 
+std::string view_string(const view_description& v) {
+    return v.uenv ? fmt::format("{}:{}", *v.uenv, v.name) : v.name;
+}
+
 envvars::patch session_patch(const concrete_image& c,
-                             const std::vector<std::string>& views) {
+                             const std::vector<view_description>& views) {
     envvars::patch p;
     std::vector<std::string> mounts;
     for (auto& [file, mount] : c.mounts) {
@@ -407,7 +451,11 @@ envvars::patch session_patch(const concrete_image& c,
     p.update_scalar("UENV_MOUNT_LIST",
                     fmt::format("{}", fmt::join(mounts, ",")));
     // always set: a session is detected by UENV_MOUNT_LIST and UENV_VIEW
-    p.update_scalar("UENV_VIEW", fmt::format("{}", fmt::join(views, ",")));
+    std::vector<std::string> names;
+    for (auto& v : views) {
+        names.push_back(view_string(v));
+    }
+    p.update_scalar("UENV_VIEW", fmt::format("{}", fmt::join(names, ",")));
     return p;
 }
 

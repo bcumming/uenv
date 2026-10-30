@@ -1,5 +1,6 @@
 #pragma once
 
+#include <compare>
 #include <optional>
 #include <string>
 
@@ -35,6 +36,26 @@ struct env_view_description {
     /// name of the view
     std::string name;
 };
+
+/// A reference to a layer view of an image: the alias of the layer, and the
+/// name of the view in that layer. The stored form is "alias:view".
+struct layer_view_ref {
+    std::string alias;
+    std::string view;
+    auto operator<=>(const layer_view_ref&) const = default;
+};
+
+/// The name of an image view. A stored image has names with no item. A
+/// runtime merge keeps the image views of each item of the list: `item` is
+/// the alias of the item that gave the view.
+struct image_view_name {
+    std::optional<std::string> item;
+    std::string name;
+    auto operator<=>(const image_view_name&) const = default;
+};
+
+std::string format_as(const layer_view_ref& r);
+std::string format_as(const image_view_name& n);
 
 struct concrete_view {
     /// the name of the view

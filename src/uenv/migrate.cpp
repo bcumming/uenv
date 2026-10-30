@@ -67,7 +67,8 @@ migrate_v1(const fs::path& root, bool reuse_links,
         auto paths = v1->uenv_paths(r.sha);
         auto label = fmt::format("{}/{}:{}@{}%{}", r.name, r.version, r.tag,
                                  r.system, r.uarch);
-        auto meta = load_meta(paths.meta / "env.json");
+        // meta/ next to the squashfs, else inside it, as v1 finds it
+        auto meta = read_squashfs_meta(paths.squashfs);
         if (!meta) {
             report.failed++;
             report.errors.push_back(fmt::format("{}: {}", label, meta.error()));
@@ -113,7 +114,7 @@ migrate_v1(const fs::path& root, bool reuse_links,
         l.digest = lo->manifest.digest;
         l.manifest_size = lo->manifest.size();
         auto img = raise_layer(l, std::nullopt, false);
-        img->is_layer = false;
+        img->kind = uenv::image_kind::image;
         img->config.meta["system"] = r.system;
         img->config.meta["uarch"] = r.uarch;
         auto objs = format::make_image_objects(*img);

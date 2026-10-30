@@ -875,7 +875,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     if (!top) {
         return unexpected{top.error()};
     }
-    const bool is_layer = img->is_layer;
+    const bool is_layer = img->kind == uenv::image_kind::layer;
     const auto& cfg = is_layer ? img->layers.front().layer.config : img->config;
     const auto repository = t.repo(cfg.name);
     const auto tag = format::make_tag(cfg, object);
@@ -1050,7 +1050,7 @@ push_layout(const fs::path& dir, const target& t, context& ctx) {
             fmt::format("sha256:{}", oci::empty_config_hex)))) {
         (void)s->put_bytes(format::make_blob(std::string(oci::empty_config_body)));
     }
-    if (auto r = s->record(*d, img->is_layer); !r) {
+    if (auto r = s->record(*d, img->kind == uenv::image_kind::layer); !r) {
         return unexpected{r.error()};
     }
     return push(*s, *d, t, ctx);
@@ -1163,7 +1163,7 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
         ctx.st.downloaded++;
         ctx.st.downloaded_bytes += l.layer.store.size;
     }
-    if (!img->is_layer) {
+    if (img->kind != uenv::image_kind::layer) {
         if (auto r = s.put_bytes(
                 format::make_blob(std::string(oci::empty_config_body)));
             !r) {
@@ -1172,7 +1172,7 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
     }
     test_fault("pull-before-db");
     // 4. the database
-    return s.record(loc->digest, img->is_layer);
+    return s.record(loc->digest, img->kind == uenv::image_kind::layer);
 }
 
 //

@@ -127,9 +127,9 @@ TEST_CASE("3/add: add promotes a squashfs file to an image", "[store]") {
     // the image config views are the views of the raise
     auto img = s.load(r->digest);
     REQUIRE(img);
-    REQUIRE(img->views.at("tools").include ==
-            std::vector<std::string>{"tools:tools"});
-    REQUIRE(!img->is_layer);
+    REQUIRE(img->views.at(vname("tools")).include ==
+            refs({"tools:tools"}));
+    REQUIRE(img->kind != uenv::image_kind::layer);
     REQUIRE(img->layers[0].layer.store.file ==
             s.blob_path(*img->layers[0].layer.store.digest));
     // the squashfs is mounted from the blob store

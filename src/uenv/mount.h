@@ -29,6 +29,16 @@ using mount_list = std::vector<mount_pair>;
 
 // one shot from string description to sorted and validated inputs
 //
+// This is the light check, and the only one that is safe in privileged code:
+// the setuid squashfs-mount helper and the remote context of the Slurm
+// plugin. It parses, sorts and checks the list, and it reads only the first
+// bytes of each image, with the credentials of the user. It does not read the
+// contents of an image, so it cannot check that a nested mount point exists.
+//
+// The unprivileged code checks nested mount points before it calls the
+// helper, with check_nested_mounts (ops.h). Do not move that check here, and
+// do not "consolidate" the two checks into one.
+//
 // auto mountvar ;
 // if (auto mountvar = env.get("UENV_MOUNT_LIST")) {
 //     auto mounts = parse_and_validate_mounts(mountvar.value());

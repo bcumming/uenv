@@ -27,6 +27,13 @@ parse_view_args(const std::string& arg);
 util::expected<std::vector<env_view_description>, parse_error>
 parse_env_view_description(const std::string& arg);
 
+// "alias:view": the stored form of a reference to a layer view
+util::expected<layer_view_ref, parse_error>
+parse_layer_view_ref(const std::string& in);
+
+// the name of a view in a config: a name with no alias
+util::expected<std::string, parse_error> parse_view_name(const std::string& in);
+
 util::expected<std::vector<uenv_description>, parse_error>
 parse_uenv_args(const std::string& arg);
 

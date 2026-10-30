@@ -350,21 +350,33 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
     }
     json views = json::object();
     for (auto& [k, v] : img->views) {
-        views[k] = {{"include", v.include}, {"env", env_json_of(v.env)}};
+        json inc = json::array();
+        for (auto& r : v.include) {
+            inc.push_back(format_as(r));
+        }
+        views[format_as(k)] = {{"include", inc}, {"env", env_json_of(v.env)}};
     }
-    json j{{"kind", img->is_layer ? "layer" : "image"},
+    std::vector<std::string> defaults;
+    for (auto& d : img->default_views) {
+        defaults.push_back(format_as(d));
+    }
+    const std::string kind =
+        img->kind == uenv::image_kind::layer           ? "layer"
+        : img->kind == uenv::image_kind::runtime_merge ? "runtime merge"
+                                                       : "image";
+    json j{{"kind", kind},
            {"label", label_of(img->config)},
            {"description", img->config.description},
            {"meta", img->config.meta},
            {"digest", img->digest ? img->digest->string() : ""},
            {"layers", layers},
            {"views", views},
-           {"default_views", img->default_views}};
+           {"default_views", defaults}};
     if (args.json) {
         term::msg("{}", j.dump(2));
         return 0;
     }
-    term::msg("{} {}", img->is_layer ? "layer" : "image", label_of(img->config));
+    term::msg("{} {}", kind, label_of(img->config));
     term::msg("  digest: {}", j["digest"].get<std::string>());
     term::msg("  meta:   {}", meta_string(img->config));
     term::msg("  layers:");
@@ -378,7 +390,7 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
                                                               return kv.key();
                                                           }),
                                        ", "));
-    term::msg("  default: {}", fmt::join(img->default_views, ","));
+    term::msg("  default: {}", fmt::join(defaults, ","));
     return 0;
 }
 

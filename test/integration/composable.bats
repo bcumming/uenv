@@ -204,7 +204,19 @@ function json_field() {
     assert_output --partial "tool"
 }
 
-@test "1/merge: start a list of an image and a relocatable layer" {
+@test "1/concretisation: the default view, and --no-default-view" {
+    require_mount
+    add_fixtures
+    # the default view of tool is defaultwombat
+    run uenv $R run tool -- bash -c 'echo "$WOMBAT|$UENV_VIEW"'
+    assert_success
+    assert_output "soup|defaultwombat"
+    run uenv $R run tool --no-default-view -- bash -c 'echo "$WOMBAT|$UENV_VIEW"'
+    assert_success
+    assert_output "|"
+}
+
+@test "1/runtime merge: start a list of an image and a relocatable layer" {
     require_mount
     add_fixtures
     # the relocatable layer moves to /user-tools
@@ -217,7 +229,7 @@ function json_field() {
     assert_output "$HOME/.config/reltools"
 }
 
-@test "1/merge: an alias lets two items with the same name start" {
+@test "1/runtime merge: an alias lets two items with the same name start" {
     require_mount
     add_fixtures
     run uenv $R run a=+reltools:/user-tools,b=+reltools:/user-environment --view=a:tools,b:tools -- bash -c 'echo $PATH'
@@ -237,7 +249,7 @@ function json_field() {
     [[ "$output" == /user-environment/env/app/bin:* ]]
 }
 
-@test "1/merge: only a layer can move" {
+@test "1/runtime merge: only a layer can move" {
     add_fixtures
     run uenv $R inspect app/42.0:/user-tools,tool
     assert_failure
@@ -255,17 +267,31 @@ function json_field() {
     assert_output --partial "env"
 }
 
-@test "1/merge: an image with more than one layer cannot be merged" {
+@test "1/runtime merge: an image with more than one layer" {
+    require_mount
     add_fixtures
     cat > "$TMP/c.json" <<'EOF'
 {"name": "my-env", "version": "1.0", "release": "v1", "meta": {},
  "views": {"dev": {"include": ["app:app", "reltools:tools"]}}, "default_view": "dev",
- "layers": [{"from": "app/42.0:v1#app"}, {"from": "+reltools", "mount": "/user-tools"}]}
+ "layers": [{"from": "app/42.0:v1#app"},
+            {"from": "+reltools", "mount": "/user-environment/modules"}]}
 EOF
     uenv $R image compose "$TMP/c.json"
-    run uenv $R inspect my-env,tool
-    assert_failure
-    assert_output --partial "more than one layer"
+    # a runtime merge has no digest, and keeps the views of each item
+    run uenv $R inspect --json my-env,tool
+    assert_success
+    run json_field '"|".join([j["kind"], j["digest"], str(len(j["layers"])), ",".join(sorted(j["views"]))])' <<< "$output"
+    assert_output "runtime merge||3|my-env:dev,tool:defaultwombat,tool:modules,tool:spack,tool:tool,tool:wombat"
+    # the layer app of my-env and the image app/42.0 are one layer
+    run uenv $R inspect --json my-env,app/42.0
+    assert_success
+    run json_field 'len(j["layers"])' <<< "$output"
+    assert_output "2"
+    # a view name with no item: the one item that has the view
+    run uenv $R run my-env,tool --view=dev,tool -- bash -c 'reltool; echo "$TOOLVAR|$UENV_VIEW"'
+    assert_success
+    assert_line "reltools in /user-environment/modules"
+    assert_line "SET|dev,tool"
 }
 
 @test "1/compose: an image from a layer of an image and a building block" {
@@ -309,12 +335,12 @@ EOF
 }
 
 @test "1/nested mount points: a merge at start with a missing directory" {
-    require_mount
     add_fixtures
-    # a merge is not checked: the helper gives the error
+    # a merge is checked as compose is, before the helper runs
     run uenv $R run app/42.0,+reltools:/user-environment/nope -- true
     assert_failure
-    echo "# message: $output" >&3
+    assert_output --partial "the layer 'reltools' is mounted at /user-environment/nope"
+    assert_output --partial "'app' has no directory /nope"
 }
 
 @test "1/compose: image env with a concrete path is not checked after a move" {
@@ -408,6 +434,17 @@ PY
     assert_success
     run bash -c "ls $REPO/v2/blobs/sha256 | wc -l"
     assert_output "0"
+}
+
+@test "6/migration: an image with meta/ only inside the squashfs" {
+    cp -a "$V1_FIXTURE" "$TMP/v1repo"
+    # v1 reads meta/env.json from the squashfs when meta/ is not next to it
+    rm -rf "$TMP"/v1repo/images/*/meta
+    run uenv repo migrate "$TMP/v1repo"
+    assert_success
+    run uenv --repo="$TMP/v1repo" image ls --no-header
+    assert_line --partial "app/42.0:v1"
+    assert_line --partial "tool/17.3.2:v1"
 }
 
 @test "6/migration: a v1 repository is refused, then migrated" {

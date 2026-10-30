@@ -26,12 +26,13 @@ label_keys keys_of(const configuration& config);
 struct session {
     composed_image image;
     concrete_image concrete;
-    std::vector<std::string> views;
+    std::vector<view_description> views;
     envvars::state environment;
     std::vector<std::string> mounts; // "file:mount"
 };
 
-// resolve the list, merge it, concretise it, and make the environment of
+// resolve the list, make a runtime merge of it, concretise it, and make the
+// environment of
 // the command
 util::expected<session, std::string>
 prepare_session(const std::string& uenv_arg,

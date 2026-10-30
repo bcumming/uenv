@@ -11,10 +11,43 @@
 
 #include <uenv/format.h>
 #include <uenv/model.h>
+#include <uenv/parse.h>
 #include <util/envvars.h>
 #include <util/sha.h>
 
 namespace v2test {
+
+// "alias:view": a reference to a layer view
+inline uenv::layer_view_ref ref(const std::string& s) {
+    return *uenv::parse_layer_view_ref(s);
+}
+inline std::vector<uenv::layer_view_ref>
+refs(std::initializer_list<std::string> l) {
+    std::vector<uenv::layer_view_ref> out;
+    for (auto& s : l) {
+        out.push_back(ref(s));
+    }
+    return out;
+}
+
+// "[item:]name": the name of an image view
+inline uenv::image_view_name vname(const std::string& s) {
+    auto v = uenv::parse_view_args(s)->front();
+    return {.item = v.uenv, .name = v.name};
+}
+inline std::vector<uenv::image_view_name>
+vnames(std::initializer_list<std::string> l) {
+    std::vector<uenv::image_view_name> out;
+    for (auto& s : l) {
+        out.push_back(vname(s));
+    }
+    return out;
+}
+
+// a --view argument: "a:x,y"
+inline std::vector<uenv::view_description> views(const std::string& s) {
+    return *uenv::parse_view_args(s);
+}
 
 inline envvars::patch prepend(std::string var, std::string value) {
     envvars::patch p;

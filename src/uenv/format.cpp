@@ -10,6 +10,7 @@
 #include <oci/manifest.h>
 #include <uenv/format.h>
 #include <uenv/model.h>
+#include <uenv/parse.h>
 #include <util/jcs.h>
 #include <util/sha.h>
 
@@ -366,7 +367,11 @@ json to_json(const image_config& c) {
             jv["description"] = v.description;
         }
         if (!v.include.empty()) {
-            jv["include"] = v.include;
+            json inc = json::array();
+            for (auto& r : v.include) {
+                inc.push_back(format_as(r));
+            }
+            jv["include"] = inc;
         }
         auto env = env_to_json(v.env);
         if (!env.empty()) {
@@ -451,7 +456,12 @@ util::expected<layer_config, error> parse_layer_config(std::string_view body) {
             }
             v.env = *env;
         }
-        c.views[it.key()] = std::move(v);
+        auto vname = parse_view_name(it.key());
+        if (!vname) {
+            return unexpected{fmt::format("{}: the view name '{}' is not valid: {}",
+                                          what, it.key(), vname.error().message())};
+        }
+        c.views[*vname] = std::move(v);
     }
     auto dv = parse_default_view(*j, what, [&](const std::string& n) {
         return c.views.contains(n);
@@ -499,7 +509,16 @@ util::expected<image_config, error> parse_image_config(std::string_view body) {
                     "{}: the view '{}': 'include' must be a list of strings",
                     what, it.key())};
             }
-            v.include = inc->get<std::vector<std::string>>();
+            for (auto& x : *inc) {
+                auto r = parse_layer_view_ref(x.get<std::string>());
+                if (!r) {
+                    return unexpected{fmt::format(
+                        "{}: the view '{}': '{}' is not a layer view of the "
+                        "form alias:view",
+                        what, it.key(), x.get<std::string>())};
+                }
+                v.include.push_back(*r);
+            }
         }
         if (auto e = it->find("env"); e != it->end()) {
             auto env = env_from_json(*e);
@@ -509,7 +528,12 @@ util::expected<image_config, error> parse_image_config(std::string_view body) {
             }
             v.env = *env;
         }
-        c.views[it.key()] = std::move(v);
+        auto vname = parse_view_name(it.key());
+        if (!vname) {
+            return unexpected{fmt::format("{}: the view name '{}' is not valid: {}",
+                                          what, it.key(), vname.error().message())};
+        }
+        c.views[*vname] = std::move(v);
     }
     auto dv = parse_default_view(*j, what, [&](const std::string& n) {
         return c.views.contains(n);
@@ -989,17 +1013,23 @@ load_composed_image(const oci::digest& digest, const std::string& body,
 //
 
 image_config image_config_of(const composed_image& img) {
-    image_config c{.shared = img.config, .views = img.views};
+    // only an image or a raised layer: the views have no item, and there is
+    // at most one default view (make_image_objects refuses a runtime merge)
+    image_config c{.shared = img.config};
+    for (auto& [name, v] : img.views) {
+        c.views[name.name] = v;
+    }
     if (!img.default_views.empty()) {
-        c.default_view = img.default_views.front();
+        c.default_view = img.default_views.front().name;
     }
     return c;
 }
 
 util::expected<image_objects, error> make_image_objects(const composed_image& img) {
-    if (img.default_views.size() > 1u) {
-        return unexpected{error{"the image has more than one default view: an "
-                                "image config can hold only one"}};
+    if (img.kind == image_kind::runtime_merge) {
+        return unexpected{error{"a runtime merge cannot be stored: it has no "
+                                "image config. Write an image config that "
+                                "contains the layers, and compose it."}};
     }
     auto cfg_bytes = canonical(to_json(image_config_of(img)));
     if (!cfg_bytes) {

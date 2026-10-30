@@ -14,6 +14,7 @@
 #include <uenv/format.h>
 #include <uenv/model.h>
 #include <uenv/ops.h>
+#include <uenv/parse.h>
 #include <uenv/store.h>
 #include <util/expected.h>
 
@@ -61,28 +62,6 @@ label_keys keys_of(const configuration& config) {
     return label_keys{config.label.at, config.label.percent};
 }
 
-namespace {
-
-std::vector<std::string> split_views(const std::string& s) {
-    std::vector<std::string> out;
-    std::size_t start = 0;
-    while (start <= s.size()) {
-        auto end = s.find(',', start);
-        auto v = s.substr(start, end == std::string::npos ? std::string::npos
-                                                          : end - start);
-        if (!v.empty()) {
-            out.push_back(v);
-        }
-        if (end == std::string::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return out;
-}
-
-} // namespace
-
 util::expected<session, std::string>
 prepare_session(const std::string& uenv_arg,
                 const std::optional<std::string>& view_arg,
@@ -108,16 +87,26 @@ prepare_session(const std::string& uenv_arg,
     if (!img) {
         return unexpected{img.error()};
     }
-    std::vector<std::string> views;
-    if (view_arg) {
-        views = split_views(*view_arg);
-    } else if (!no_default_view) {
-        views = img->default_views;
+    // a runtime merge can put the mount point of one item inside a layer of
+    // another item: check it here, as compose does, so that the error names
+    // the layers. This runs unprivileged: see check_nested_mounts in ops.h.
+    if (auto r = check_nested_mounts(*img); !r) {
+        return unexpected{r.error()};
     }
-    auto c = concretise(*img, views);
+    std::vector<view_description> requested;
+    if (view_arg) {
+        auto v = parse_view_args(*view_arg);
+        if (!v) {
+            return unexpected{
+                fmt::format("invalid --view: {}", v.error().message())};
+        }
+        requested = std::move(*v);
+    }
+    auto c = concretise(*img, requested, !no_default_view);
     if (!c) {
         return unexpected{c.error()};
     }
+    const auto& views = c->views;
     // a start checks that each squashfs is in the store before a mount
     for (auto& l : img->layers) {
         std::error_code ec;
@@ -141,15 +130,15 @@ prepare_session(const std::string& uenv_arg,
     for (auto& l : img->layers) {
         std::vector<std::string> lviews;
         for (auto& v : views) {
-            auto it = img->views.find(v);
+            auto it = img->views.find({.item = v.uenv, .name = v.name});
             if (it != img->views.end()) {
                 for (auto& inc : it->second.include) {
-                    if (inc.starts_with(l.alias + ":")) {
-                        lviews.push_back(inc.substr(l.alias.size() + 1));
+                    if (inc.alias == l.alias) {
+                        lviews.push_back(inc.view);
                     }
                 }
-            } else if (v.starts_with(l.alias + ":")) {
-                lviews.push_back(v.substr(l.alias.size() + 1));
+            } else if (v.uenv == l.alias) {
+                lviews.push_back(v.name);
             }
         }
         auto& cfg = l.layer.config;

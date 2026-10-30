@@ -12,12 +12,16 @@ blob store and the order of writes held up under unit tests, fault injection
 and real mounts. They also held up against two registries: zot and
 distribution (`registry:2`).
 
-The implementation found 25 shortcomings. Most are small gaps in the text.
+The implementation found 26 shortcomings. Most are small gaps in the text.
 Six need a change to the design:
 
-1. **The merge of a list at start** has no defined identity, name or default
-   view. The model has one `default_view`, and a merge needs one for each
-   item.
+1. **The runtime merge** (`uenv start a,b`) does not fit the model of an
+   image. The design gives it the default view of each item, but an image
+   config holds only one default view. Its digest is the digest of its image
+   config, so a runtime merge of two items that each have a default view has
+   no digest. The design also does not give its name, version and release
+   (see M1 and M3). The change: a runtime merge is not an image. It has no
+   identity, and it accepts images with more than one layer.
 2. **The strict migration** blocks each command on a v1 repository. This
    includes the start of a squashfs file, which needs no repository. It also
    blocks each user of a read-only site repository that the site did not
@@ -32,7 +36,7 @@ Six need a change to the design:
 6. **The Slurm plugin** reads `UENV_MOUNT_LIST` into 1024 bytes, which holds
    only 6 layers from the blob store. This is from the code: no test ran it.
 
-The spike fixes 11 of the shortcomings, in separate commits. Most fixes have
+The spike fixes 13 of the shortcomings, in separate commits. Most fixes have
 a test that fails before the fix and passes after it. The fixes are
 proposals for the design: the design documents are not changed.
 
@@ -212,10 +216,10 @@ or low (the text is not clear).
 
 | id  | section                         | severity | status     |
 | --- | ------------------------------- | -------- | ---------- |
-| M1  | "Merge a list at start"         | high     | fixed      |
-| M2  | "Merge a list at start"         | medium   | spike rule |
-| M3  | "Merge a list at start"         | medium   | fixed      |
-| M4  | "Merge", "Concretisation"       | low      | open       |
+| M1  | "Runtime merge"                 | high     | fixed      |
+| M2  | "Runtime merge"                 | medium   | spike rule |
+| M3  | "Runtime merge"                 | medium   | fixed      |
+| M4  | "Merge", "Concretisation"       | low      | fixed      |
 | M5  | "Nested mount points"           | high     | fixed      |
 | M6  | "Image views"                   | medium   | fixed      |
 | M7  | "The composed_image model"      | low      | spike rule |
@@ -223,12 +227,15 @@ or low (the text is not clear).
 | M9  | "Rules" of mount points         | low      | spike rule |
 | M10 | "A check for absolute paths"    | low      | spike rule |
 
-- **M1. A merge has no identity.** The model has one `default_view`. A merge
-  takes "the `default_view` of each item", so the result has more than one.
-  An image config holds only one, so the "image that uenv would write" does
-  not exist when two items have a default view. This is the usual case. The
-  test `1/merge: the digest of a merged list` shows it. The spike makes the
-  model hold a list, and leaves the default views out of the identity.
+- **M1. A runtime merge has no identity.** The model has one
+  `default_view`. A merge takes "the `default_view` of each item", so the
+  result has more than one. An image config holds only one, so the "image
+  that uenv would write" does not exist when two items have a default view.
+  This is the usual case. The test `1/merge: the digest of a merged list`
+  showed it. The first fix made the model hold a list, and left the default
+  views out of the identity. The later change gives a runtime merge no
+  identity: nothing used it, and it needed an image config that can hold
+  each part of a runtime merge.
 - **M2. A merge of one image changes the image.** A list of one image, merged
   with the rules, gets views named `alias:view`, an empty `meta` and a new
   digest. Thus `uenv start my-env --view=dev` would fail. The spike treats a
@@ -236,19 +243,26 @@ or low (the text is not clear).
 - **M3. A merge has no name.** The design does not give the name, version or
   release of a merge. The first spike used the aliases in the order of the
   list. The identity then depended on that order: the test of M1 showed it.
-  The fix uses the order of the layers.
+  The first fix used the order of the layers. With no identity, the name is
+  only for people to read, in the order of the list.
 - **M4. Two kinds of view share one syntax.** The image views of a merge are
   named `alias:view`, which is also the full name of a layer view. The image
   view comes first in the lookup, so the result is right. But a reader cannot
-  tell the two kinds apart.
+  tell the two kinds apart. The model kept both as strings, and the code
+  split and joined them in four places. The fix gives the model two types:
+  `layer_view_ref` for an `include` entry, and `image_view_name` with the
+  alias of the merge item. The format code parses the strings when it reads
+  a config. The same change fixes `--no-default-view`: with no `--view`, it
+  loaded the default views.
 - **M5. The nested mount point is not checked.** The design says that a check
   at compose needs `unsquashfs`, and that uenv does not want a new
   dependency. But uenv already runs `unsquashfs` to read `meta/` from a
   squashfs file (`src/util/fs.cpp`). Without a check, the start fails with
   "the mount point is not a valid path: /user-environment/nope", with no
   layer name. A filtered listing (`unsquashfs -l <file> <path>`) takes about
-  2 ms on a squashfs with 200 000 inodes. The fix checks at compose. A merge
-  at start is still not checked.
+  2 ms on a squashfs with 200 000 inodes. The fix checks at compose, and in
+  the merge at start. The check stays out of the setuid helper: as root, it
+  would read the contents of images that the user cannot read.
 - **M6. An image view keeps the old path after a move.** An image view `env`
   uses concrete paths. When a compose moves a relocatable layer, an `env`
   with the old path passes with no message. The fix gives a warning,
@@ -271,6 +285,7 @@ or low (the text is not clear).
 | D1  | 3 "Layout", 6 "The rollout"              | high     | fixed  |
 | D2  | 6 "The migration of a local repository"  | medium   | fixed  |
 | D3  | 4 "Site rules for referrers"             | low      | open   |
+| D4  | 6 "The migration of a local repository"  | high     | fixed  |
 
 - **D1. The strict migration blocks too much.** Each command stops on a v1
   repository. In the test environment, the default repository
@@ -287,6 +302,13 @@ or low (the text is not clear).
   again. The spike finds the digest of a file that an earlier run linked by
   its inode, and does not hash it again. The resume test shows "2 squashfs
   hashed" for 3 images.
+- **D4. The migration needs `meta/` next to each squashfs.** A migration of a
+  real v1 repository stopped with "the uenv meta data file .../meta/env.json
+  does not exist". The image had no `meta/` directory, and its `env.json`
+  was inside the squashfs. v1 reads it from there, and the start of a
+  squashfs file does too. The migration did not. The fix uses the same
+  search, and the test `6/migration: an image with meta/ only inside the
+  squashfs` fails before the fix.
 - **D3. The site rules cannot be tested end to end.** The referrer rules are
   only in `/etc/uenv/config.toml`, which a test cannot write without root.
   The unit tests give the rules directly.
