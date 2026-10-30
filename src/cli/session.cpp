@@ -1,0 +1,166 @@
+#include <algorithm>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include <fmt/core.h>
+#include <fmt/ranges.h>
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+
+#include <uenv/env.h>
+#include <uenv/format.h>
+#include <uenv/model.h>
+#include <uenv/ops.h>
+#include <uenv/store.h>
+#include <util/expected.h>
+
+#include "session.h"
+
+namespace uenv {
+
+namespace fs = std::filesystem;
+using util::unexpected;
+
+util::expected<std::vector<store>, std::string>
+open_stores(const global_settings& settings, bool readonly) {
+    std::vector<store> stores;
+    for (auto& r : settings.config.repos) {
+        auto s = store::open(r.path, readonly);
+        if (!s) {
+            return unexpected{s.error()};
+        }
+        stores.push_back(std::move(*s));
+    }
+    return stores;
+}
+
+util::expected<store, std::string>
+open_user_store(const global_settings& settings) {
+    auto repo = settings.config.user_repo();
+    if (!repo) {
+        return unexpected{std::string{
+            "there is no repository: give one with --repo, or in the "
+            "configuration"}};
+    }
+    return store::create(repo->path);
+}
+
+label_keys keys_of(const global_settings& settings) {
+    return label_keys{settings.config.label.at, settings.config.label.percent};
+}
+
+namespace {
+
+std::vector<std::string> split_views(const std::string& s) {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    while (start <= s.size()) {
+        auto end = s.find(',', start);
+        auto v = s.substr(start, end == std::string::npos ? std::string::npos
+                                                          : end - start);
+        if (!v.empty()) {
+            out.push_back(v);
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return out;
+}
+
+} // namespace
+
+util::expected<session, std::string>
+prepare_session(const std::string& uenv_arg,
+                const std::optional<std::string>& view_arg,
+                bool no_default_view, bool force,
+                const global_settings& settings) {
+    auto items = parse_item_list(uenv_arg, keys_of(settings),
+                                 settings.config.system_name);
+    if (!items) {
+        return unexpected{items.error()};
+    }
+    // open the repositories only if an item needs a lookup: a squashfs file
+    // needs no repository, also one that is not migrated
+    std::vector<store> no_stores;
+    util::expected<std::vector<store>, std::string> stores = std::move(no_stores);
+    if (std::any_of(items->begin(), items->end(),
+                    [](auto& i) { return !i.file; })) {
+        stores = open_stores(settings);
+        if (!stores) {
+            return unexpected{stores.error()};
+        }
+    }
+    auto img = resolve_items(*stores, *items, force);
+    if (!img) {
+        return unexpected{img.error()};
+    }
+    std::vector<std::string> views;
+    if (view_arg) {
+        views = split_views(*view_arg);
+    } else if (!no_default_view) {
+        views = img->default_views;
+    }
+    auto c = concretise(*img, views);
+    if (!c) {
+        return unexpected{c.error()};
+    }
+    // a start checks that each squashfs is in the store before a mount
+    for (auto& l : img->layers) {
+        std::error_code ec;
+        if (l.layer.store.file && !fs::exists(*l.layer.store.file, ec)) {
+            return unexpected{fmt::format(
+                "the squashfs of the layer '{}' of {} is missing ({}). Run "
+                "`uenv repo update`, then pull the image again.",
+                l.alias, img->config.name,
+                l.layer.store.digest ? l.layer.store.digest->string()
+                                     : l.layer.store.file->string())};
+        }
+    }
+    session out{.image = *img, .concrete = *c, .views = views};
+    out.environment = settings.calling_environment;
+    auto patches = c->patches;
+    patches.push_back(session_patch(*c, views));
+    apply_patches(out.environment, patches);
+
+    // telemetry: one entry for each layer
+    nlohmann::json tel = nlohmann::json::array();
+    for (auto& l : img->layers) {
+        std::vector<std::string> lviews;
+        for (auto& v : views) {
+            auto it = img->views.find(v);
+            if (it != img->views.end()) {
+                for (auto& inc : it->second.include) {
+                    if (inc.starts_with(l.alias + ":")) {
+                        lviews.push_back(inc.substr(l.alias.size() + 1));
+                    }
+                }
+            } else if (v.starts_with(l.alias + ":")) {
+                lviews.push_back(v.substr(l.alias.size() + 1));
+            }
+        }
+        auto& cfg = l.layer.config;
+        nlohmann::json e{{"mount", l.mount},
+                         {"sqfs", l.layer.store.file->string()},
+                         {"views", lviews},
+                         {"name", l.alias}};
+        e["digest"] = l.layer.store.digest
+                          ? nlohmann::json(l.layer.store.digest->hex())
+                          : nlohmann::json(nullptr);
+        e["label"] = cfg.version.empty()
+                         ? nlohmann::json(nullptr)
+                         : nlohmann::json(fmt::format("{}/{}:{}", cfg.name,
+                                                      cfg.version, cfg.release));
+        tel.push_back(e);
+    }
+    out.environment.set("UENV_TELEMETRY", tel.dump());
+    forward_unsecure_variables(out.environment, "SQFSMNT_FWD_");
+    for (auto& [file, mount] : c->mounts) {
+        out.mounts.push_back(fmt::format("{}:{}", file.string(), mount));
+    }
+    return out;
+}
+
+} // namespace uenv

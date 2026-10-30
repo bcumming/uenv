@@ -601,6 +601,19 @@ envvars::state generate_environment(const env& environment,
     return vars;
 }
 
+void forward_unsecure_variables(envvars::state& vars,
+                                const std::string& prefix) {
+    std::vector<envvars::scalar> secure_vars;
+    for (const auto& e : vars.variables()) {
+        if (unsecure_envvars__.contains(e.first)) {
+            secure_vars.push_back({prefix + e.first, e.second});
+        }
+    }
+    for (const auto& var : secure_vars) {
+        vars.set(var.name, *(var.value));
+    }
+}
+
 bool operator==(const uenv_record& lhs, const uenv_record& rhs) {
     return std::tie(lhs.name, lhs.version, lhs.tag, lhs.date, lhs.system,
                     lhs.uarch, lhs.sha) ==

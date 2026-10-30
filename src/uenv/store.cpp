@@ -598,26 +598,35 @@ util::expected<store, std::string> store::create(const fs::path& root) {
         return unexpected{
             fmt::format("{} is not a directory", root.string())};
     }
+    return create_in(root, "v2");
+}
+
+util::expected<store, std::string> store::create_in(const fs::path& root,
+                                                    const std::string& dir) {
     std::error_code ec;
-    const auto v2 = root / "v2";
+    const auto v2 = root / dir;
     fs::create_directories(v2 / "blobs" / "sha256", ec);
     fs::create_directories(v2 / "tmp", ec);
     if (ec) {
         return unexpected{fmt::format("unable to create {}: {}", v2.string(),
                                       ec.message())};
     }
-    if (auto r = util::write_file_atomic(v2 / "oci-layout",
-                                         R"({"imageLayoutVersion":"1.0.0"})");
-        !r) {
-        return unexpected{r.error()};
+    if (!fs::exists(v2 / "oci-layout", ec)) {
+        if (auto r = util::write_file_atomic(
+                v2 / "oci-layout", R"({"imageLayoutVersion":"1.0.0"})");
+            !r) {
+            return unexpected{r.error()};
+        }
     }
     auto db = object_db::open(v2 / "index.db", util::sqlite::open_mode::create);
     if (!db) {
         return unexpected{db.error()};
     }
-    store s{root, std::move(*db), false};
-    if (auto r = s.write_index_json(); !r) {
-        return unexpected{r.error()};
+    store s{root, std::move(*db), false, dir};
+    if (!fs::exists(v2 / "index.json", ec)) {
+        if (auto r = s.write_index_json(); !r) {
+            return unexpected{r.error()};
+        }
     }
     return s;
 }
@@ -778,11 +787,10 @@ format::blob_reader store::reader() const {
 }
 
 format::file_locator store::locator() const {
+    // the path in the store, also if the file is missing: a start checks
+    // that each file exists, and names the missing layer
     return [this](const oci::digest& d) -> std::optional<fs::path> {
-        if (has_blob(d)) {
-            return blob_path(d);
-        }
-        return std::nullopt;
+        return blob_path(d);
     };
 }
 

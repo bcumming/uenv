@@ -13,6 +13,7 @@
 #include <util/shell.h>
 
 #include "help.h"
+#include "session.h"
 #include "start.h"
 #include "terminal.h"
 #include "uenv.h"
@@ -27,6 +28,7 @@ struct start_args {
     bool ignore_tty = false;
     std::optional<std::string> view_description;
     bool disable_default_view = false;
+    bool force = false;
 };
 
 std::string format_as(const start_args& args) {
@@ -52,6 +54,9 @@ argparse::command start_command(const global_settings& settings) {
                         "comma separated list of uenv to mount")
         .required()
         .complete(completion::custom("uenv_list"));
+    start_cli.add_flag("force", &start_args::force,
+                       "mount a layer that is not relocatable at a different "
+                       "mount point");
     start_cli.add_flag("ignore-tty", &start_args::ignore_tty,
                        "don't check for non-interactive shells");
     start_cli.add_flag(
@@ -119,28 +124,19 @@ will not work, because it starts a new interactive shell.)",
         return 1;
     }
 
-    const auto resolved =
-        resolve_uenv_args(args.uenv_description, settings.config.repos,
-                          settings.config.system_name);
-    if (!resolved) {
-        term::error("{}", resolved.error());
+    auto session = prepare_session(args.uenv_description,
+                                   args.view_description,
+                                   args.disable_default_view, args.force,
+                                   settings);
+    if (!session) {
+        term::error("{}", session.error());
         term::hint("{}",
                    (settings.config.repos.empty() ? messages::no_repos()
                                                   : messages::no_matches()));
         return 1;
     }
-
-    const auto env = concretise_env(
-        resolved.value(), args.view_description, args.uenv_description,
-        settings.config.repos, !args.disable_default_view);
-
-    if (!env) {
-        term::error("{}", env.error());
-        return 1;
-    }
-
-    auto runtime_environment = generate_environment(
-        *env, settings.calling_environment, "SQFSMNT_FWD_");
+    auto& runtime_environment = session->environment;
+    const auto& mounts = session->mounts;
 
     // find the current shell (zsh, bash, etc)
     auto shell = util::current_shell(settings.calling_environment);
@@ -150,12 +146,6 @@ will not work, because it starts a new interactive shell.)",
         return 1;
     }
     spdlog::info("using shell: {}", shell->string());
-
-    std::vector<std::string> mounts;
-    for (auto m : env->uenvs) {
-        mounts.push_back(fmt::format("{}:{}", m.second.sqfs_path.string(),
-                                     m.second.mount_path));
-    }
 
     const auto commands = uenv::squashfs_mount_args(
         settings.calling_environment, mounts, false /* join */,

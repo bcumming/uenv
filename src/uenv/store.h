@@ -125,12 +125,16 @@ class store {
     // create a repository (or open it if it exists)
     static util::expected<store, std::string>
     create(const std::filesystem::path& root);
+    // create or open the layout in root/<dir>, for example "v2.tmp" during
+    // a migration
+    static util::expected<store, std::string>
+    create_in(const std::filesystem::path& root, const std::string& dir);
 
     const std::filesystem::path& root() const {
         return root_;
     }
     std::filesystem::path v2() const {
-        return root_ / "v2";
+        return root_ / dir_;
     }
     std::filesystem::path blob_path(const oci::digest& d) const;
     bool has_blob(const oci::digest& d) const;
@@ -192,12 +196,15 @@ class store {
     }
 
   private:
-    store(std::filesystem::path root, object_db db, bool ro)
-        : root_(std::move(root)), db_(std::move(db)), readonly_(ro) {
+    store(std::filesystem::path root, object_db db, bool ro,
+          std::string dir = "v2")
+        : root_(std::move(root)), db_(std::move(db)), readonly_(ro),
+          dir_(std::move(dir)) {
     }
     std::filesystem::path root_;
     object_db db_;
     bool readonly_ = false;
+    std::string dir_ = "v2";
 };
 
 // the state of a repository directory

@@ -58,6 +58,7 @@ if uenv_cli
       install: false,
   )
   fs.copyfile('integration/registry.bats', 'registry.bats')
+  fs.copyfile('integration/composable.bats', 'composable.bats')
 endif
 if uenv_slurm_plugin
   custom_target('elastic-mock',
@@ -163,6 +164,7 @@ if uenv_cli
   endif
   test('cli', bats, args: ['./test/cli.bats'], env: cli_env, is_parallel : false)
   test('registry', bats, args: ['./test/registry.bats'], is_parallel : false)
+  test('composable', bats, args: ['./test/composable.bats'], is_parallel : false)
   test('completion', bats, args: ['./test/completion.bats'], is_parallel : false)
 endif
 if use_fuse

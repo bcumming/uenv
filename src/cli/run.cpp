@@ -14,6 +14,7 @@
 #include <util/subprocess.h>
 
 #include "help.h"
+#include "session.h"
 #include "run.h"
 #include "terminal.h"
 #include "uenv.h"
@@ -29,6 +30,7 @@ struct run_args {
     bool join = false;
     std::vector<std::string> commands;
     bool disable_default_view = false;
+    bool force = false;
 };
 
 std::string format_as(const run_args& args) {
@@ -60,6 +62,9 @@ argparse::command run_command(const global_settings& settings) {
         .required()
         .complete(completion::command());
 
+    run_cli.add_flag("force", &run_args::force,
+                     "mount a layer that is not relocatable at a different "
+                     "mount point");
     run_cli.add_flag("no-default-view", &run_args::disable_default_view,
                      "disable loading default views when no view is specified");
 
@@ -96,34 +101,19 @@ You need to finish the current session by typing 'exit' or hitting '<ctrl-d>'.)"
         term::warn("{}", messages::no_repos());
     }
 
-    const auto resolved =
-        resolve_uenv_args(args.uenv_description, settings.config.repos,
-                          settings.config.system_name);
-    if (!resolved) {
-        term::error("{}", resolved.error());
+    auto session = prepare_session(args.uenv_description,
+                                   args.view_description,
+                                   args.disable_default_view, args.force,
+                                   settings);
+    if (!session) {
+        term::error("{}", session.error());
         term::hint("{}",
                    (settings.config.repos.empty() ? messages::no_repos()
                                                   : messages::no_matches()));
         return 1;
     }
-
-    const auto env = concretise_env(
-        resolved.value(), args.view_description, args.uenv_description,
-        settings.config.repos, !args.disable_default_view);
-
-    if (!env) {
-        term::error("{}", env.error());
-        return 1;
-    }
-
-    auto runtime_environment = generate_environment(
-        *env, settings.calling_environment, "SQFSMNT_FWD_");
-
-    std::vector<std::string> mounts;
-    for (auto m : env->uenvs) {
-        mounts.push_back(fmt::format("{}:{}", m.second.sqfs_path.string(),
-                                     m.second.mount_path));
-    }
+    auto& runtime_environment = session->environment;
+    const auto& mounts = session->mounts;
 
     const auto commands =
         uenv::squashfs_mount_args(settings.calling_environment, mounts,

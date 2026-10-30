@@ -399,11 +399,8 @@ envvars::patch session_patch(const concrete_image& c,
     }
     p.update_scalar("UENV_MOUNT_LIST",
                     fmt::format("{}", fmt::join(mounts, ",")));
-    if (views.empty()) {
-        p.update_scalar("UENV_VIEW", std::nullopt);
-    } else {
-        p.update_scalar("UENV_VIEW", fmt::format("{}", fmt::join(views, ",")));
-    }
+    // always set: a session is detected by UENV_MOUNT_LIST and UENV_VIEW
+    p.update_scalar("UENV_VIEW", fmt::format("{}", fmt::join(views, ",")));
     return p;
 }
 

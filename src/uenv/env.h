@@ -117,4 +117,8 @@ envvars::state generate_environment(const env&, const envvars::state&,
 // returns true iff in a running uenv session
 bool in_uenv_session(const envvars::state&);
 
+// add a copy, with the prefix, of each variable that the dynamic loader
+// removes from the environment of a setuid process
+void forward_unsecure_variables(envvars::state& vars, const std::string& prefix);
+
 } // namespace uenv
