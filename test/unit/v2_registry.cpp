@@ -749,6 +749,9 @@ TEST_CASE("5/catalogue: an event that does not match the configs",
     auto t = *reg::resolve_target(e->cfg, {});
     auto s = new_store();
     auto app = add_image(s, prgenv());
+    // the only event in the log is wrong (a second event for one digest is
+    // ignored: the first event wins)
+    e->ctx.write_catalogue = false;
     auto r = reg::push(s, app.digest, t, e->ctx);
     REQUIRE(r);
     // a wrong event: the label tools/1.0:v1 for the digest of prgenv-gnu
