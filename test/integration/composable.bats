@@ -325,16 +325,15 @@ EOF
  "layers": [{"from": "app/42.0:v1#app"},
             {"from": "+reltools", "mount": "/user-environment/nope"}]}
 EOF
-    # FINDING (nested-msg): without the check, compose accepts it, and the
-    # start fails with "the mount point is not a valid path", with no layer
-    # name. The fix checks it at compose, with unsquashfs.
+    # compose checks the directory with unsquashfs, so that the error names
+    # the layers
     run uenv $R image compose "$TMP/c.json"
     assert_failure
     assert_output --partial "the layer 'reltools' is mounted at /user-environment/nope"
     assert_output --partial "'app' has no directory /nope"
 }
 
-@test "1/nested mount points: a merge at start with a missing directory" {
+@test "1/nested mount points: a runtime merge with a missing directory" {
     add_fixtures
     # a merge is checked as compose is, before the helper runs
     run uenv $R run app/42.0,+reltools:/user-environment/nope -- true
@@ -343,7 +342,7 @@ EOF
     assert_output --partial "'app' has no directory /nope"
 }
 
-@test "1/compose: image env with a concrete path is not checked after a move" {
+@test "1/compose: a warning for the old path of a moved layer" {
     add_fixtures
     # the author moves reltools, and does not change MY_TOOLS_ROOT
     cat > "$TMP/c.json" <<'EOF'
@@ -354,14 +353,12 @@ EOF
  "layers": [{"from": "+reltools", "mount": "/user-tools"}]}
 EOF
     run uenv $R image compose "$TMP/c.json"
-    # FINDING (image-env-stale): compose accepts it. The fix adds a warning.
     assert_success
     assert_output --partial "sets MY_TOOLS_ROOT with the path /user-environment/tools"
     # no warning when the path is correct
     sed -i 's|"MY_TOOLS_ROOT": "/user-environment/tools"|"MY_TOOLS_ROOT": "/user-tools"|' "$TMP/c.json"
     run uenv $R image compose "$TMP/c.json"
     refute_output --partial "warning"
-
 }
 
 @test "6/a squashfs file: start it directly" {

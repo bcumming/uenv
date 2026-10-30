@@ -1,81 +1,61 @@
-# Composable uenv: report of the spike
+# Composable uenv: the design and its spike
 
-**Branch:** `spike/composable-v2`, from `main` at `ca5ef47` (2026-10-30).
-**Input:** the design documents `design/1-composition.md` to
+**Branch:** `spike/composable-v2`, from `main` at `ca5ef47`.
+**Design:** the documents `design/1-composition.md` to
 `design/6-migration.md`.
+
+This report describes the current state of the design and of the spike that
+implements it. When the design documents describe the solution to a
+problem, and the spike implements it with a test, the problem is not in this
+report.
 
 ## Summary
 
 The spike implements the design, and a test suite that checks it rule by
-rule. Most of the design works as written. The model, the OCI layout, the
-blob store and the order of writes held up under unit tests, fault injection
-and real mounts. They also held up against two registries: zot and
-distribution (`registry:2`).
+rule. The model, the runtime merge, the OCI layout, the blob store, the
+order of writes and the migration of v1 repositories work as the design
+says. They held up under unit tests, fault injection and real mounts. The
+registry operations held up against two registries: zot and distribution
+(`registry:2`).
 
-The implementation found 27 shortcomings. Most are small gaps in the text.
-Six need a change to the design:
+These items are open:
 
-1. **The runtime merge** (`uenv start a,b`) does not fit the model of an
-   image. The design gives it the default view of each item, but an image
-   config holds only one default view. Its digest is the digest of its image
-   config, so a runtime merge of two items that each have a default view has
-   no digest. The design also does not give its name, version and release
-   (see M1 and M3). The change: a runtime merge is not an image. It has no
-   identity, and it accepts images with more than one layer.
-2. **The strict migration** blocks each command on a v1 repository. This
-   includes the start of a squashfs file, which needs no repository. It also
-   blocks each user of a read-only site repository that the site did not
-   migrate. One image that fails blocks the whole repository, and a v1
-   image that the old uenv pulls later is never migrated. The change: the
-   migration writes each image directly into the v2 part, and it can run
-   again at any time.
-3. **The catalogue** (not designed yet) is the weakest part. An event log of
-   tags loses events from a slow writer, a lookup trusts copies of the
-   configs, and the history grows with no limit.
-4. **The nested mount point** check is possible at compose time with no new
-   dependency, and it costs some milliseconds.
-5. **The image view `env`** keeps the old path when a compose moves a layer,
-   with no check.
-6. **The Slurm plugin** reads `UENV_MOUNT_LIST` into 1024 bytes, which holds
-   only 6 layers from the blob store. This is from the code: no test ran it.
-
-The spike fixes 14 of the shortcomings, in separate commits. Most fixes have
-a test that fails before the fix and passes after it. The fixes are
-proposals for the design: the design documents are not changed.
+1. **The catalogue** is the weakest part. The design does not describe it
+   yet, and the spike uses an event log of tags. The log needs a window for
+   slow writers and a check of the configs against the label, which the
+   spike has. It also needs compaction, which it does not have: the history
+   grows with no limit (C1 to C6).
+2. **Four rules are missing from the design** (M7 to M10). The spike chose
+   a rule for each.
+3. **Two parts are not tested:** the site rules for referrers end to end
+   (D3), and the old test suites, which test v1 (T2).
+4. **Three registry observations** (R1 to R3) are evidence for the design,
+   not defects.
 
 ## 1. The implementation
 
 The spike adds one module for each design topic. It uses the code of `main`
-where it fits: the native OCI client, `envvars`, `sha256`, and the argument
-parser.
+where it fits: the native OCI client, `envvars`, `sha256`, the label and
+view parsers, and the argument parser.
 
 | module                       | design            | what it does                                                     |
 | ---------------------------- | ----------------- | ---------------------------------------------------------------- |
 | `src/util/jcs.*`             | 2 "Canonical"     | RFC 8785 encoding of JSON                                        |
 | `src/util/sqlite.*`          | 3 "The database"  | SQLite with bound parameters                                     |
-| `src/uenv/model.*`           | 1                 | `composed_image`, checks, raise, merge, concretise, patches      |
+| `src/uenv/model.*`           | 1                 | `composed_image`, checks, raise, runtime merge, concretise       |
 | `src/uenv/format.*`          | 2                 | configs, manifests, index, media types, tags                     |
 | `src/uenv/store.*`           | 3                 | blob store, v2 schema, add, delete, update, `index.json`         |
-| `src/uenv/ops.*`             | 1, 3              | add (promote), compose, labels, resolution of a list             |
+| `src/uenv/ops.*`             | 1, 3              | add (promote), compose, labels, nested mount points              |
 | `src/uenv/registry.*`        | 4, 5              | push, pull, copy, delete, attach, catalogue                      |
-| `src/uenv/migrate.*`         | 3, 6              | `uenv repo migrate`                                              |
+| `src/uenv/migrate.*`         | 3, 6              | `uenv repo migrate`, and the v1 images that are not migrated     |
 | `src/uenv/session.*`         | 1 "Concretisation"| the environment of `start`, `run` and the Slurm plugin           |
 | `src/cli/image2.cpp`, `repo2`| all               | `uenv image ...` and `uenv repo ...`                             |
-
-The commits are in this order:
-
-| commit    | content                                                               |
-| --------- | --------------------------------------------------------------------- |
-| `1a5736b` | core: model, format, store, local operations, unit tests              |
-| `e9884a1` | registry operations and the catalogue, tests against zot              |
-| `1634e42` | the CLI, and the end-to-end suite `composable.bats`                   |
-| `4bc65dd` | the session in the library, the Slurm plugin on the composed model    |
-| `0a8a6e0` | fixes, one for each commit, to `585f657` (see section 5)              |
 
 The CLI replaces `uenv image ls/add/rm/inspect/find/pull/push/copy/delete`
 and `uenv repo create/status/update/migrate`. It adds `uenv image compose`
 and `uenv image attach`. `uenv start` and `uenv run` take a list of images,
-layers (`+label`) and squashfs files, with `--force`.
+layers (`+label`) and squashfs files, with `--force`. A list of more than
+one item is a runtime merge.
 
 ## 2. How the spike settled the open questions
 
@@ -94,8 +74,6 @@ The spike chose the simplest solution that is good enough to test.
 | a status after a copy (4, question 1) | the leading proposal: `[[referrers]]` with `travel` and `fan_out`           |
 | the steps of the operations (4)       | from the decided rules: order of writes, empty blob, mount, digests         |
 | the input of compose                  | a JSON file: the image config, and `layers` (`alias`, `mount`, `from`)      |
-| the merge of one item (1)             | one item with no alias and no mount is the item itself                      |
-| the name of a merge (1)               | the aliases in the order of the layers                                      |
 
 **Why an event log.** The catalogue must work with the OCI API only. It must
 also lose no update when writers run at the same time (5, "Requirements").
@@ -127,11 +105,13 @@ design sections and their tests.
 
 - **Model** (`[jcs]`, `[config]`, `[model]`, `[env]`, `[concretise]`,
   `[oci-layout]`): the RFC 8785 test vectors for the key order. The strict
-  parser, unknown fields, and the refusal of a later version. The five checks
-  of a `composed_image`. Each permutation of three layers gives the same
-  digest, mounts and environment. Raise, `--force` and the merge of a list.
-  The four operations on a prefix path, and the rules of `${@NAME@}`. Each
-  form of index that the design calls an error. The form of a tag.
+  parser, the parse of view references, unknown fields, and the refusal of a
+  later version. The five checks of a `composed_image`. Each permutation of
+  three layers gives the same digest, mounts and environment. Raise and
+  `--force`. The runtime merge: images with more than one layer, view names
+  of each item, a rename of an alias, a shared layer, no identity. The four
+  operations on a prefix path, and the rules of `${@NAME@}`. Each form of
+  index that the design calls an error. The form of a tag.
 - **Repository** (`[store]`, `[compose]`): the layout, and the refusal of a
   v1 repository and of an unknown `user_version`. Promotion, shared blobs,
   lookup by label, id and layer marker. An add and a delete that stop at
@@ -145,11 +125,13 @@ design sections and their tests.
   Pagination. A registry with no catalogue. Push from an OCI layout
   directory. The catalogue with eight writers at the same time, a slow
   writer, and a wrong event.
-- **End to end**: add, ls, inspect, run with the setuid helper, merged lists,
-  aliases, the order of views, compose with a nested mount point, a missing
+- **End to end**: add, ls, inspect, run with the setuid helper, the default
+  view and `--no-default-view`, runtime merges with images of more than one
+  layer, the order of views, compose with a nested mount point, a missing
   squashfs, `oras` on the repository, a Python reference for the canonical
-  form, a stopped add and pull, migration and its resume, and the registry
-  commands through the CLI.
+  form, a stopped add and pull, the migration (a stop, a failed image, a
+  second run, `meta/` inside the squashfs), and the registry commands
+  through the CLI.
 
 ### Results
 
@@ -185,9 +167,7 @@ docker run -d -p 127.0.0.1:5000:5000 -e REGISTRY_STORAGE_DELETE_ENABLED=true reg
 UENV_TEST_REGISTRY=http://127.0.0.1:5000 ./test/unit "[registry]~[gc]"
 ```
 
-### What the design passed
-
-The tests show that these rules work, with no change:
+### What the tests show
 
 - **The order of layers has no meaning.** Each permutation gives the same
   identity, mounts and environment.
@@ -206,70 +186,28 @@ The tests show that these rules work, with no change:
   and a zot GC, an image that shares its layers is still complete.
 - **Views in order** and `${@NAME@}` behave as the design says, with real
   mounts.
+- **A runtime merge** starts an image with more than one layer next to a
+  different image, with real mounts. A layer that two items share is
+  mounted once, and a nested mount point is checked before the mount.
 - **The migration** links the squashfs files, and does not change the v1
-  part.
+  part. Each migrated image can be used at once. A failed image does not
+  stop the others, and a second run adds only what is not migrated.
 
-## 4. Shortcomings
+## 4. Open items
 
-Each entry gives the design section, what happened, and the evidence. The
-severity is high (the design needs a change), medium (a rule is missing),
-or low (the text is not clear).
+Each entry gives the design section, what happened, and the evidence.
 
-### The model and the start (1-composition)
+### Rules that the design does not give (1-composition)
 
-| id  | section                         | severity | status     |
-| --- | ------------------------------- | -------- | ---------- |
-| M1  | "Runtime merge"                 | high     | fixed      |
-| M2  | "Runtime merge"                 | medium   | spike rule |
-| M3  | "Runtime merge"                 | medium   | fixed      |
-| M4  | "Merge", "Concretisation"       | low      | fixed      |
-| M5  | "Nested mount points"           | high     | fixed      |
-| M6  | "Image views"                   | medium   | fixed      |
-| M7  | "The composed_image model"      | low      | spike rule |
-| M8  | "Variables in a value"          | low      | spike rule |
-| M9  | "Rules" of mount points         | low      | spike rule |
-| M10 | "A check for absolute paths"    | low      | spike rule |
+The spike chose a rule for each. The design must state a rule.
 
-- **M1. A runtime merge has no identity.** The model has one
-  `default_view`. A merge takes "the `default_view` of each item", so the
-  result has more than one. An image config holds only one, so the "image
-  that uenv would write" does not exist when two items have a default view.
-  This is the usual case. The test `1/merge: the digest of a merged list`
-  showed it. The first fix made the model hold a list, and left the default
-  views out of the identity. The later change gives a runtime merge no
-  identity: nothing used it, and it needed an image config that can hold
-  each part of a runtime merge.
-- **M2. A merge of one image changes the image.** A list of one image, merged
-  with the rules, gets views named `alias:view`, an empty `meta` and a new
-  digest. Thus `uenv start my-env --view=dev` would fail. The spike treats a
-  list of one item with no alias and no mount as the item itself.
-- **M3. A merge has no name.** The design does not give the name, version or
-  release of a merge. The first spike used the aliases in the order of the
-  list. The identity then depended on that order: the test of M1 showed it.
-  The first fix used the order of the layers. With no identity, the name is
-  only for people to read, in the order of the list.
-- **M4. Two kinds of view share one syntax.** The image views of a merge are
-  named `alias:view`, which is also the full name of a layer view. The image
-  view comes first in the lookup, so the result is right. But a reader cannot
-  tell the two kinds apart. The model kept both as strings, and the code
-  split and joined them in four places. The fix gives the model two types:
-  `layer_view_ref` for an `include` entry, and `image_view_name` with the
-  alias of the merge item. The format code parses the strings when it reads
-  a config. The same change fixes `--no-default-view`: with no `--view`, it
-  loaded the default views.
-- **M5. The nested mount point is not checked.** The design says that a check
-  at compose needs `unsquashfs`, and that uenv does not want a new
-  dependency. But uenv already runs `unsquashfs` to read `meta/` from a
-  squashfs file (`src/util/fs.cpp`). Without a check, the start fails with
-  "the mount point is not a valid path: /user-environment/nope", with no
-  layer name. A filtered listing (`unsquashfs -l <file> <path>`) takes about
-  2 ms on a squashfs with 200 000 inodes. The fix checks at compose, and in
-  the merge at start. The check stays out of the setuid helper: as root, it
-  would read the contents of images that the user cannot read.
-- **M6. An image view keeps the old path after a move.** An image view `env`
-  uses concrete paths. When a compose moves a relocatable layer, an `env`
-  with the old path passes with no message. The fix gives a warning,
-  unless a different layer is at the old path.
+| id  | section                         | status     |
+| --- | ------------------------------- | ---------- |
+| M7  | "The composed_image model"      | spike rule |
+| M8  | "Variables in a value"          | spike rule |
+| M9  | "Rules" of mount points         | spike rule |
+| M10 | "A check for absolute paths"    | spike rule |
+
 - **M7. The model needs the size of a manifest.** An index entry is a
   descriptor: a digest and a size. The model has only the digest of a layer.
   The spike adds `manifest_size`.
@@ -281,63 +219,63 @@ or low (the text is not clear).
   `/a/tools` is in `/a/tools/bin`, but not in `/a/tools2`. The spike requires
   the end of the value, or a character that cannot continue a file name.
 
-### The repository and the migration (3, 6)
+### The catalogue (5, a choice of the spike)
 
-| id  | section                                  | severity | status |
-| --- | ---------------------------------------- | -------- | ------ |
-| D1  | 3 "Layout", 6 "The rollout"              | high     | fixed  |
-| D2  | 6 "The migration of a local repository"  | medium   | fixed  |
-| D3  | 4 "Site rules for referrers"             | low      | open   |
-| D4  | 6 "The migration of a local repository"  | high     | fixed  |
-| D5  | 3 "Migration from v1"                    | high     | fixed  |
+The design does not describe the catalogue yet. These are the problems of
+the event log that the spike uses. C1, C2 and C4 have a solution in the
+spike, with a test. The catalogue design must include them.
 
-- **D1. The strict migration blocks too much.** Each command stops on a v1
-  repository. In the test environment, the default repository
-  (`~/.uenv/repo`) was in the v1 format. Thus `uenv run ./file.squashfs`
-  failed, although it needs no repository. The design also says that a
-  repository can be read only, for example one that a site provides. A user
-  cannot migrate such a repository, so each command fails until the site
-  migrates it. The fixes open the repositories only for a lookup, and skip a
-  read-only v1 repository with a warning.
-- **D2. The migration hashes each squashfs.** On `main`, a v1 record can have
-  the digest of a manifest, not of the squashfs file. Thus the migration must
-  hash each file. A migration that continues must find "each v1 image whose
-  index is already in the database". To do that, it must hash each file
-  again. The spike finds the digest of a file that an earlier run linked by
-  its inode, and does not hash it again. The resume test shows "2 squashfs
-  hashed" for 3 images.
-- **D4. The migration needs `meta/` next to each squashfs.** A migration of a
-  real v1 repository stopped with "the uenv meta data file .../meta/env.json
-  does not exist". The image had no `meta/` directory, and its `env.json`
-  was inside the squashfs. v1 reads it from there, and the start of a
-  squashfs file does too. The migration did not. The fix uses the same
-  search, and the test `6/migration: an image with meta/ only inside the
-  squashfs` fails before the fix.
-- **D5. The migration is all or nothing.** The design makes the v2 part in
-  `v2.tmp/`, and renames it only when each image is migrated. A migration
-  of a real v1 repository stopped at one image (D4). The three images that
-  it migrated could not be used, and `uenv repo status` showed the
-  repository as v1. Also, a v1 image that the old uenv pulls after the
-  migration, for example during a return to the old uenv, is never
-  migrated: a second `uenv repo migrate` stops with "already migrated". The
-  change writes each image directly into `v2/`, reports a failed image and
-  continues, and runs again at any time to add what is not migrated.
-  `uenv repo status` shows the v1 images that are not migrated. The cost:
-  an image that the user deletes from `v2/` comes back with the next
-  migration. Tests: `6/migration: a failed image does not stop the others`
-  and `6/migration: a migration that stops can continue`.
-- **D3. The site rules cannot be tested end to end.** The referrer rules are
+| id  | problem                                     | status     |
+| --- | ------------------------------------------- | ---------- |
+| C1  | a slow writer: an event is lost             | spike only |
+| C2  | `last` must be a tag that exists            | spike only |
+| C3  | a push that stops after the tag             | analysis   |
+| C4  | a lookup trusts copies of the configs       | spike only |
+| C5  | the first event for a digest wins           | open       |
+| C6  | the history grows with no limit             | open       |
+
+- **C1. An event of a slow writer is lost.** The tags sort by the time of the
+  writer. A writer that is slow, or whose clock is behind, writes an event
+  that sorts before the newest event that a reader saw. The reader never
+  reads it. The test uses a clock that is 5 s behind. The spike lists from
+  the newest seen tag before a window of 300 s, and skips the events that it
+  saw. The window costs no request.
+- **C2. The cursor must be a real tag.** zot returns no tags for a value of
+  `last` that is not a tag, so a cursor made from a time fails. The spike
+  uses a seen tag. distribution ignores `last`, so there the set of seen
+  tags keeps the result right.
+- **C3. A push that stops after the tag is not in the catalogue.** The image
+  is in the registry, with its tag, but a lookup by label does not find it.
+  A second push adds the event, because the tag check accepts the same
+  digest. The other order (event first) gives an entry for an image that
+  does not exist. The spike keeps the order, and documents the second push.
+- **C4. A lookup trusts the copies.** An event holds the fields of each
+  image, which nobody checks against the configs. A wrong event gave a
+  different image for a label: the test shows it without the check. The
+  spike checks the configs against the label before the download of a
+  squashfs.
+- **C5. The first event for a digest wins.** The find database keys records
+  by digest. A later event for the same digest, for example a correction, has
+  no effect.
+- **C6. The history grows.** A first fill costs one request for each event,
+  plus the listing. The benchmark measured 0.04 s for 50 events and 0.5 s for
+  400, on a local zot. Each push, copy and delete adds an event, and nothing
+  deletes them. Requirement 5 ("a first fill costs a small number of
+  requests") then fails after some months.
+
+### Parts that are not tested
+
+- **D3. The site rules for referrers** (4, "Site rules for referrers") are
   only in `/etc/uenv/config.toml`, which a test cannot write without root.
-  The unit tests give the rules directly.
+  The unit tests give the rules directly, but no test reads them from the
+  site config.
+- **T2. The old suites test v1.** `cli.bats`, `registry.bats` and the label
+  completion use the v1 database, the v1 fixture and the listing service.
+  They need a new version for the new format.
 
-### The registry operations (4)
+### Registry observations (4)
 
-| id  | section                                 | severity | status    |
-| --- | --------------------------------------- | -------- | --------- |
-| R1  | "uenv uploads a blob only if"           | low      | evidence  |
-| R2  | "Delete and cleanup"                    | low      | evidence  |
-| R3  | "Requirements of a registry"            | low      | evidence  |
-| R4  | Slurm and the blob store                | high     | fixed     |
+These are evidence for the design, not defects.
 
 - **R1. zot does not need the mount.** zot answers a HEAD for a blob that is in
   a different repository with 200, because it stores each blob one time. Thus
@@ -351,122 +289,25 @@ or low (the text is not clear).
 - **R3. distribution 2.x does not meet the requirements.** It has no
   referrers API, so 3 referrer tests fail. It ignores `n` and `last` on
   `tags/list`, and returns all tags in one response. The design already
-  requires the referrers API, so this is evidence, not a defect.
-- **R4. The Slurm plugin reads 1024 bytes.** An entry of `UENV_MOUNT_LIST` has
-  about 149 characters on Alps, in v1 and in the blob store. 1024 bytes hold
-  6 layers. Composition makes images with more layers. From the code, with a
-  7th layer `spank_getenv` returns `ESPANK_NOSPACE`, and the plugin stops
-  with an error on the compute nodes. No test ran this. The fix grows the
-  buffer when `spank_getenv` reports `ESPANK_NOSPACE`. The fix builds, but no
-  test runs it.
+  requires the referrers API.
 
-### The catalogue (5, a choice of the spike)
+## 5. Proposed changes to the design
 
-| id  | problem                                     | severity | status   |
-| --- | ------------------------------------------- | -------- | -------- |
-| C1  | a slow writer: an event is lost             | high     | fixed    |
-| C2  | `last` must be a tag that exists            | medium   | fixed    |
-| C3  | a push that stops after the tag             | medium   | analysis |
-| C4  | a lookup trusts copies of the configs       | high     | fixed    |
-| C5  | the first event for a digest wins           | low      | open     |
-| C6  | the history grows with no limit             | high     | open     |
-
-- **C1. An event of a slow writer is lost.** The tags sort by the time of the
-  writer. A writer that is slow, or whose clock is behind, writes an event
-  that sorts before the newest event that a reader saw. The reader never
-  reads it. The test uses a clock that is 5 s behind. The fix lists from the
-  newest seen tag before a window of 300 s, and skips the events that it
-  saw. The window costs no request.
-- **C2. The cursor must be a real tag.** zot returns no tags for a value of
-  `last` that is not a tag, so a cursor made from a time fails. The fix uses
-  a seen tag. distribution ignores `last`, so there the set of seen tags
-  keeps the result right.
-- **C3. A push that stops after the tag is not in the catalogue.** The image
-  is in the registry, with its tag, but a lookup by label does not find it.
-  A second push adds the event, because the tag check accepts the same
-  digest.
-  The other order (event first) gives an entry for an image that does not
-  exist. The spike keeps the order, and documents the second push.
-- **C4. A lookup trusts the copies.** An event holds the fields of each
-  image, which nobody checks against the configs. A wrong event gave a
-  different image for a label: the test shows it without the fix. The fix
-  checks the configs against the label before the download of a squashfs.
-- **C5. The first event for a digest wins.** The find database keys records
-  by digest. A later event for the same digest, for example a correction, has
-  no effect.
-- **C6. The history grows.** A first fill costs one request for each event,
-  plus the listing. The benchmark measured 0.04 s for 50 events and 0.5 s for
-  400, on a local zot. Each push, copy and delete adds an event, and nothing
-  deletes them. Requirement 5 ("a first fill costs a small number of
-  requests") then fails after some months.
-
-### The tests and the tools
-
-- **T1. A hang in the test harness.** The tests start zot with pipes for its
-  output, and nothing reads them. After some 64 kB of output, zot blocked in
-  a request that held the lock of a repository. The catalogue benchmark then
-  hung after about 200 events. The fix sends the output to a file.
-  `test/unit/oci_registry.cpp` on `main` starts zot in the same way.
-- **T2. The old suites test v1.** `cli.bats`, `registry.bats` and the label
-  completion use the v1 database, the v1 fixture and the listing service.
-  They need a new version for the new format.
-
-## 5. Fixes and findings
-
-| commit    | fixes | change                                         | test                                       |
-| --------- | ----- | ---------------------------------------------- | ------------------------------------------ |
-| `0a8a6e0` | R4    | grow the buffer of `getenv_wrapper`            | builds only                                |
-| `c565827` | C1    | re-read a window of 300 s, skip seen events    | `5/catalogue: an event with an earlier...` |
-| `5470cc9` | M6    | warn about an old path in an image view `env`  | `1/compose: a stale path...`, bats         |
-| `40da085` | M1    | the identity of a merge has no default views   | `1/merge: the digest of a merged list`     |
-| `8a7157e` | M3    | the name of a merge in the order of the layers | the same test, with a reversed list        |
-| `5552646` | D1    | skip a read-only v1 repository                 | `6/rollout: ...`                           |
-| `c3c3627` | C4    | check the configs against the label            | `5/catalogue: an event that does not...`   |
-| `06117d4` | M5    | check a nested mount point at compose          | bats `1/nested mount points: ...`          |
-| `585f657` | M5    | no check if `unsquashfs` cannot read it        | the store tests                            |
-| `013206d` | T1    | zot output to a file, the benchmark of C6      | `[.bench]`                                 |
-
-The changes in `1634e42` also fix D1 (the start of a squashfs file opens no
-repository) and C2. The inode reuse of D2 is in `1634e42`.
-
-### Proposed changes to the design
-
-1. **1-composition, "Runtime merge":** the result of `uenv run/start a,b`
-   and `srun --uenv=a,b` is a runtime merge. It is not an image: it has no
-   identity, and uenv never stores it. It has one default view for each
-   item, in the order of the list. An item can be an image with more than
-   one layer. View names are scoped by the item, a clash of layer aliases
-   renames the later layer, and a shared layer is mounted once. A list of
-   one item with no alias and no mount is the item itself.
-2. **1-composition, "Nested mount points":** compose and the runtime merge
-   check each nested mount point with `unsquashfs`, which uenv already uses.
-   The check never runs in privileged code.
-3. **1-composition, "Image views":** compose warns about an image view `env`
-   that has the build mount point of a moved layer.
-4. **3-repository and 6-migration:** a command that needs no lookup does not
-   open the repositories. uenv skips a read-only v1 repository, with a
-   warning. Thus the site must migrate its repositories before the upgrade.
-5. **6-migration:** the migration hashes each squashfs, because the v1 sha is
-   not always the digest of the file. A resumed migration finds the linked
-   files by inode. It finds `meta/env.json` inside the squashfs when there
-   is no `meta/` next to it.
-6. **3-repository, "Migration from v1":** the migration writes each image
-   directly into `v2/`, and a failed image does not stop the others. It can
-   run again at any time, and adds only the v1 images that are not
-   migrated. `uenv repo status` shows them.
-7. **5-discovery, "The catalogue":** if the design keeps the event log, it
-   needs a window and a set of seen events. A lookup checks the configs
-   against the label. It also needs compaction, for example a snapshot event
-   that holds the state, so that a first fill starts at the newest snapshot.
-   The spike did not test compaction.
-8. **The Slurm plugin:** no fixed limit on the size of an environment
-   variable.
+1. **5-discovery, "The catalogue":** if the design keeps the event log, it
+   needs a window and a set of seen events (C1, C2). A lookup checks the
+   configs against the label (C4). It also needs compaction, for example a
+   snapshot event that holds the state, so that a first fill starts at the
+   newest snapshot (C6). The spike did not test compaction.
+2. **1-composition:** a rule for each of M7 to M10. The rules of the spike
+   are a good start.
 
 ## 6. What the spike does not cover
 
 - **JFrog.** Each registry test ran on zot and on distribution. The JFrog
   evidence in `design/evidence/` is from earlier tests.
 - **The Slurm plugin at run time.** It builds, but no cluster was available.
+  The plugin no longer limits the size of `UENV_MOUNT_LIST`, but no test ran
+  it with many layers.
 - **The FUSE backend.** The spike used the kernel backend only.
 - **Tab completion** of labels and views in the new format.
 - **The code in `uenv::v1`.** The v1 code stays in place: the migration uses
