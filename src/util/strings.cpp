@@ -82,6 +82,38 @@ std::string join(std::string_view joiner,
     return result;
 }
 
+std::string base64_encode(std::string_view input) {
+    static constexpr char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((input.size() + 2) / 3) * 4);
+    std::size_t i = 0;
+    while (i + 2 < input.size()) {
+        unsigned n = (unsigned char)input[i] << 16 |
+                     (unsigned char)input[i + 1] << 8 |
+                     (unsigned char)input[i + 2];
+        out += table[(n >> 18) & 63];
+        out += table[(n >> 12) & 63];
+        out += table[(n >> 6) & 63];
+        out += table[n & 63];
+        i += 3;
+    }
+    if (i + 1 == input.size()) {
+        unsigned n = (unsigned char)input[i] << 16;
+        out += table[(n >> 18) & 63];
+        out += table[(n >> 12) & 63];
+        out += "==";
+    } else if (i + 2 == input.size()) {
+        unsigned n = (unsigned char)input[i] << 16 |
+                     (unsigned char)input[i + 1] << 8;
+        out += table[(n >> 18) & 63];
+        out += table[(n >> 12) & 63];
+        out += table[(n >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+
 std::optional<std::string> base64_decode(std::string_view input) {
     auto value = [](unsigned char c) -> int {
         if (c >= 'A' && c <= 'Z') {

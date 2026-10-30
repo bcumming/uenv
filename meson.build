@@ -145,6 +145,7 @@ lib_uenv_src = [
         'src/uenv/ops.cpp',
         'src/uenv/parse.cpp',
         'src/uenv/print.cpp',
+        'src/uenv/registry.cpp',
         'src/uenv/repository.cpp',
         'src/uenv/settings.cpp',
         'src/uenv/store.cpp',

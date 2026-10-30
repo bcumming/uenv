@@ -72,6 +72,22 @@ class client {
     // list the repository's tags.
     util::expected<std::vector<std::string>, client_error> list_tags();
 
+    // one page of tags/list: at most n tags (if given), after `last` (if
+    // given). `more` is true if the registry gave a Link to a next page.
+    struct tags_page {
+        std::vector<std::string> tags;
+        bool more = false;
+        // the number of HTTP requests that the call made
+        unsigned requests = 0;
+    };
+    util::expected<tags_page, client_error>
+    list_tags_page(std::optional<std::size_t> n,
+                   std::optional<std::string> last);
+    // all tags after `last`, following each page
+    util::expected<tags_page, client_error>
+    list_tags_after(std::optional<std::string> last,
+                    std::optional<std::size_t> page_size = std::nullopt);
+
     // list artifacts that refer to `d` (replaces `oras discover`). registries
     // that do not implement the OCI 1.1 Referrers API (404) are handled by
     // falling back to the referrers tag schema (the <algo>-<hex> tag that the

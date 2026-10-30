@@ -23,8 +23,33 @@ struct registry_config {
     std::optional<util::url> listing_url;
 };
 
+// a registry, by name (4-registry-ops.md, "Registries and addresses")
+struct named_registry {
+    std::string name;
+    util::url url;
+    std::optional<std::string> namespace_;
+};
+
+// a site rule for a kind of referrer (4-registry-ops.md, "Site rules")
+struct referrer_rule {
+    std::string name;
+    std::string artifact_type;
+    std::vector<std::string> subjects; // "image", "layer"
+    std::vector<std::string> travel;   // "copy", "compose"
+    bool fan_out = false;
+};
+
+struct label_settings {
+    std::string at = "system";
+    std::string percent = "uarch";
+};
+
 struct config_base {
     repo_list repos;
+    std::vector<named_registry> registries;
+    std::optional<std::string> default_registry;
+    std::vector<referrer_rule> referrer_rules;
+    std::optional<label_settings> label;
     std::optional<bool> color;
     std::optional<std::string> elastic_config;
     std::optional<std::string> system_name;
@@ -69,6 +94,10 @@ load_config(const uenv::config_base& cli_config,
 
 struct configuration {
     uenv::repo_list repos;
+    std::vector<named_registry> registries;
+    std::optional<std::string> default_registry;
+    std::vector<referrer_rule> referrer_rules;
+    label_settings label;
     bool color;
     std::optional<std::string> elastic_config;
     std::optional<std::string> system_name;

@@ -55,6 +55,9 @@ class client_impl {
     get_manifest(const reference& ref);
 
     util::expected<std::vector<std::string>, client_error> list_tags();
+    util::expected<client::tags_page, client_error>
+    list_tags_page(std::optional<std::size_t> n,
+                   std::optional<std::string> last);
 
     util::expected<std::vector<descriptor>, client_error>
     referrers(const digest& d);
@@ -412,6 +415,44 @@ client_impl::get_manifest(const reference& ref) {
         .media_type = resp->headers.get("content-type").value_or("")};
 }
 
+util::expected<client::tags_page, client_error>
+client_impl::list_tags_page(std::optional<std::size_t> n,
+                            std::optional<std::string> last) {
+    util::curl::request req;
+    auto url = registry_url_.resolve(detail::tags_path(repository_));
+    if (n) {
+        url = url.query_param("n", std::to_string(*n));
+    }
+    if (last) {
+        url = url.query_param("last", *last);
+    }
+    req.url = url.string();
+
+    auto resp = authed_perform(req, false);
+    if (!resp) {
+        return util::unexpected{resp.error()};
+    }
+    if (resp->status == 404) {
+        // a repository that does not exist has no tags
+        return client::tags_page{{}, false, 1};
+    }
+    if (resp->status != 200) {
+        return util::unexpected{client_error{
+            fmt::format("failed to list tags (status {})", resp->status),
+            resp->status}};
+    }
+    auto tags = detail::parse_tags_list(resp->body);
+    if (!tags) {
+        return util::unexpected{
+            client_error{"could not parse tags/list response"}};
+    }
+    bool more = false;
+    if (auto link = resp->headers.get("link")) {
+        more = link->find("rel=\"next\"") != std::string::npos;
+    }
+    return client::tags_page{*tags, more, 1};
+}
+
 util::expected<std::vector<std::string>, client_error>
 client_impl::list_tags() {
     util::curl::request req;
@@ -697,6 +738,33 @@ util::expected<void, client_error> client::get_blob_to_file(
 util::expected<manifest_response, client_error>
 client::get_manifest(const reference& ref) {
     return impl_->get_manifest(ref);
+}
+
+util::expected<client::tags_page, client_error>
+client::list_tags_page(std::optional<std::size_t> n,
+                       std::optional<std::string> last) {
+    return impl_->list_tags_page(n, std::move(last));
+}
+
+util::expected<client::tags_page, client_error>
+client::list_tags_after(std::optional<std::string> last,
+                        std::optional<std::size_t> page_size) {
+    tags_page all;
+    while (true) {
+        auto page = impl_->list_tags_page(page_size, last);
+        if (!page) {
+            return util::unexpected{page.error()};
+        }
+        all.requests += page->requests;
+        all.tags.insert(all.tags.end(), page->tags.begin(), page->tags.end());
+        // a registry may give no Link header: a full page also means "more"
+        bool full = page_size && page->tags.size() == *page_size;
+        if ((!page->more && !full) || page->tags.empty()) {
+            break;
+        }
+        last = page->tags.back();
+    }
+    return all;
 }
 
 util::expected<std::vector<std::string>, client_error> client::list_tags() {

@@ -12,6 +12,7 @@
 #include <uenv/parse.h>
 #include <uenv/repository.h>
 #include <uenv/settings.h>
+#include <uenv/store.h>
 #include <util/color.h>
 #include <util/envvars.h>
 #include <util/expected.h>
@@ -108,6 +109,19 @@ config_base merge(const config_base& lhs, const config_base& rhs) {
     result.registry = lhs.registry   ? lhs.registry
                       : rhs.registry ? rhs.registry
                                      : std::nullopt;
+    // registries: an entry of lhs replaces an entry of rhs with the same name
+    for (auto& r : lhs.registries) {
+        std::erase_if(result.registries,
+                      [&](auto& x) { return x.name == r.name; });
+        result.registries.push_back(r);
+    }
+    result.default_registry =
+        lhs.default_registry ? lhs.default_registry : rhs.default_registry;
+    // referrer rules are a policy of the site: see load_config
+    if (!lhs.referrer_rules.empty()) {
+        result.referrer_rules = lhs.referrer_rules;
+    }
+    result.label = lhs.label ? lhs.label : rhs.label;
     result.warnings.insert(result.warnings.end(), lhs.warnings.begin(),
                            lhs.warnings.end());
     return result;
@@ -166,7 +180,6 @@ config_base default_config(const envvars::state& env) {
 }
 
 configuration generate_configuration(const config_base& base) {
-    using enum repo_state;
 
     configuration config;
 
@@ -179,7 +192,7 @@ configuration generate_configuration(const config_base& base) {
     // the default repository, before they can start using it confusing and
     // inconvenient.
     if (base.repos.size() &&
-        uenv::validate_repository(base.repos[0].path) == no_exist) {
+        uenv::inspect_repo(base.repos[0].path) == repo_layout::none) {
         config.default_repo = base.repos[0];
     }
 
@@ -187,10 +200,11 @@ configuration generate_configuration(const config_base& base) {
     // invalid state.
     config.repos = base.repos;
     config.repos.filter([](const auto& r) {
-        const auto status = uenv::validate_repository(r.path);
-        switch (status) {
-        case readwrite:
-        case readonly:
+        // a v1-only repository is kept, so that a command can tell the user
+        // to migrate it
+        switch (uenv::inspect_repo(r.path)) {
+        case repo_layout::v2:
+        case repo_layout::v1_only:
             return true;
         default:
             spdlog::warn("ignoring repository {} (invalid)", r);
@@ -216,6 +230,10 @@ configuration generate_configuration(const config_base& base) {
     }
 
     config.registry = base.registry;
+    config.registries = base.registries;
+    config.default_registry = base.default_registry;
+    config.referrer_rules = base.referrer_rules;
+    config.label = base.label.value_or(label_settings{});
 
     return config;
 }
@@ -380,7 +398,13 @@ load_config(const uenv::config_base& cli_config,
     }
 
     if (auto usr = uenv::load_user_config(calling_env, mode)) {
-        config = merge(*usr, config);
+        auto u = *usr;
+        if (!u.referrer_rules.empty()) {
+            spdlog::warn("the [[referrers]] rules of the user configuration "
+                         "are ignored: they are a policy of the site");
+            u.referrer_rules.clear();
+        }
+        config = merge(u, config);
     } else {
         // do not treat broken user configuration as a hard error.
         // we could make this a hard error, because users can fix their
@@ -708,6 +732,133 @@ parse_registry(const toml::node& input) {
                            .listing_url = std::move(parsed_listing)};
 }
 
+util::expected<std::vector<std::string>, config_error>
+parse_string_array(const toml::node& value, std::string_view what) {
+    std::vector<std::string> out;
+    const auto arr = value.as_array();
+    if (!arr) {
+        return make_config_error(fmt::format("{} must be a list of strings", what),
+                                 value.source().begin.line);
+    }
+    for (auto& e : *arr) {
+        if (auto v = e.value<std::string>()) {
+            out.push_back(*v);
+        } else {
+            return make_config_error(
+                fmt::format("{} must be a list of strings", what),
+                e.source().begin.line);
+        }
+    }
+    return out;
+}
+
+util::expected<std::vector<named_registry>, config_error>
+parse_registries(const toml::node& input) {
+    std::vector<named_registry> out;
+    const auto arr = input.as_array();
+    if (!arr) {
+        return make_config_error("registries must be an array of tables",
+                                 input.source().begin.line);
+    }
+    for (auto& node : *arr) {
+        const auto tbl = node.as_table();
+        if (!tbl) {
+            return make_config_error("a registry must be a table",
+                                     node.source().begin.line);
+        }
+        std::optional<std::string> name, url, nspace;
+        for (auto& [k, v] : *tbl) {
+            auto key = k.str();
+            auto sv = v.value<std::string>();
+            if (!sv) {
+                return make_config_error(
+                    fmt::format("registries.{} must be a string", key),
+                    v.source().begin.line);
+            }
+            if (key == "name") {
+                name = sv;
+            } else if (key == "url") {
+                url = sv;
+            } else if (key == "namespace") {
+                nspace = sv;
+            } else if (key == "catalogue") {
+                // the catalogue is the log in the registry (see 5-discovery)
+            } else {
+                return make_config_error(fmt::format("unexpected key '{}'", key),
+                                         v.source().begin.line);
+            }
+        }
+        if (!name || !url) {
+            return make_config_error("a registry needs a name and a url",
+                                     node.source().begin.line);
+        }
+        auto u = *url;
+        if (u.find("://") == std::string::npos) {
+            u = "https://" + u;
+        }
+        auto parsed = parse_config_url("registries.url", u,
+                                       node.source().begin.line);
+        if (!parsed) {
+            return util::unexpected{parsed.error()};
+        }
+        out.push_back({*name, *parsed, nspace});
+    }
+    return out;
+}
+
+util::expected<std::vector<referrer_rule>, config_error>
+parse_referrer_rules(const toml::node& input) {
+    std::vector<referrer_rule> out;
+    const auto arr = input.as_array();
+    if (!arr) {
+        return make_config_error("referrers must be an array of tables",
+                                 input.source().begin.line);
+    }
+    for (auto& node : *arr) {
+        const auto tbl = node.as_table();
+        if (!tbl) {
+            return make_config_error("a referrer rule must be a table",
+                                     node.source().begin.line);
+        }
+        referrer_rule r;
+        for (auto& [k, v] : *tbl) {
+            auto key = k.str();
+            if (key == "name" || key == "artifact_type") {
+                auto sv = v.value<std::string>();
+                if (!sv) {
+                    return make_config_error(
+                        fmt::format("referrers.{} must be a string", key),
+                        v.source().begin.line);
+                }
+                (key == "name" ? r.name : r.artifact_type) = *sv;
+            } else if (key == "subjects" || key == "travel") {
+                auto list = parse_string_array(v, key);
+                if (!list) {
+                    return util::unexpected{list.error()};
+                }
+                (key == "subjects" ? r.subjects : r.travel) = *list;
+            } else if (key == "fan_out") {
+                auto b = v.value<bool>();
+                if (!b) {
+                    return make_config_error("referrers.fan_out must be a bool",
+                                             v.source().begin.line);
+                }
+                r.fan_out = *b;
+            } else {
+                return make_config_error(fmt::format("unexpected key '{}'", key),
+                                         v.source().begin.line);
+            }
+        }
+        if (r.name.empty() || r.artifact_type.empty()) {
+            return make_config_error(
+                "a referrer rule needs a name and an artifact_type",
+                node.source().begin.line);
+        }
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
 util::expected<config_base, config_error>
 parse_config_toml(const toml::table& input, const envvars::state& calling_env) {
     // build a config from the key value
@@ -747,6 +898,44 @@ parse_config_toml(const toml::table& input, const envvars::state& calling_env) {
             } else {
                 return util::unexpected{v.error()};
             }
+        } else if (key == "registries") {
+            auto v = parse_registries(value);
+            if (!v) {
+                return util::unexpected{v.error()};
+            }
+            config.registries = *v;
+        } else if (key == "default_registry") {
+            auto v = value.value<std::string>();
+            if (!v) {
+                return make_config_error("default_registry must be a string",
+                                         value.source().begin.line);
+            }
+            config.default_registry = *v;
+        } else if (key == "referrers") {
+            auto v = parse_referrer_rules(value);
+            if (!v) {
+                return util::unexpected{v.error()};
+            }
+            config.referrer_rules = *v;
+        } else if (key == "label") {
+            const auto tbl = value.as_table();
+            if (!tbl) {
+                return make_config_error("label must be a table",
+                                         value.source().begin.line);
+            }
+            label_settings ls;
+            for (auto& [k, v] : *tbl) {
+                auto sv = v.value<std::string>();
+                if (!sv || (k.str() != "at" && k.str() != "percent")) {
+                    return make_config_error(
+                        fmt::format("label.{}: expected 'at' or 'percent' with "
+                                    "a string value",
+                                    k.str()),
+                        v.source().begin.line);
+                }
+                (k.str() == "at" ? ls.at : ls.percent) = *sv;
+            }
+            config.label = ls;
         } else if (key == "registry") {
             if (auto v = parse_registry(value)) {
                 spdlog::debug("parse_config_toml: added registry url {}",

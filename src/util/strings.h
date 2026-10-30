@@ -53,4 +53,7 @@ std::string join(std::string_view joiner, const std::vector<std::string>& list);
 // outside the base64 alphabet. Note: this is NOT the URL-safe ('-'/'_')
 // alphabet.
 std::optional<std::string> base64_decode(std::string_view input);
+
+// encode bytes as standard base64 (RFC 4648), with padding
+std::string base64_encode(std::string_view input);
 } // namespace util
