@@ -623,6 +623,7 @@ TEST_CASE("5/catalogue: an event with an earlier time than the last event "
     REQUIRE(reg::push(s, b.digest, t, slow.ctx));
 
     SECTION("no overlap: the event is lost") {
+        reader.refresh_overlap = 0;
         auto r = cat.refresh();
         // FINDING (catalogue-order): the reader never sees b
         REQUIRE(r->events == 0u);
@@ -633,6 +634,13 @@ TEST_CASE("5/catalogue: an event with an earlier time than the last event "
         auto r = cat.refresh();
         REQUIRE(r->events == 1u);
         REQUIRE(cat.db().all()->size() == 2u);
+        // the overlap reads the seen events again, with no request for them
+        auto again = cat.refresh();
+        REQUIRE(again->requests == 1u);
+    }
+    SECTION("the default overlap finds the event") {
+        auto r = cat.refresh();
+        REQUIRE(r->events == 1u);
     }
 }
 

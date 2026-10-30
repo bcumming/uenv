@@ -82,8 +82,10 @@ struct context {
     // the catalogue: if false, nothing is appended (to test a registry
     // with no catalogue)
     bool write_catalogue = true;
-    // the overlap of a refresh, in seconds (see "catalogue")
-    unsigned refresh_overlap = 0;
+    // the overlap of a refresh, in seconds: re-read the events of a writer
+    // that is slow, or whose clock is behind. Seen events are skipped, so
+    // the overlap costs no request.
+    unsigned refresh_overlap = 300;
     // a test hook: an offset of the clock of this writer, in microseconds,
     // to make a writer with a clock that is wrong, or a slow writer
     std::int64_t clock_offset_us = 0;
