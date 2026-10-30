@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <oci/digest.h>
+#include <oci/types.h>
 #include <uenv/view.h>
 #include <util/envvars.h>
 #include <util/expected.h>
@@ -50,11 +51,10 @@ struct layer_view {
 };
 
 struct layer {
-    // the digest of the layer manifest: absent for a squashfs file
-    std::optional<oci::digest> digest;
-    // the size of the layer manifest: an index entry is a descriptor, so a
-    // writer needs the size as well as the digest
-    std::uint64_t manifest_size = 0;
+    // the descriptor of the layer manifest, as an index entry refers to it.
+    // Its digest is the identity of the layer. Absent for a squashfs file.
+    std::optional<oci::descriptor> manifest;
+    // the file system image: its digest and size
     storage store;
 
     uenv::config config;
@@ -62,6 +62,14 @@ struct layer {
     bool relocatable = false;
     std::map<std::string, layer_view> views;
     std::optional<std::string> default_view;
+
+    // the identity of the layer: the digest of its layer manifest
+    std::optional<oci::digest> digest() const {
+        if (!manifest) {
+            return std::nullopt;
+        }
+        return manifest->digest;
+    }
 };
 
 struct named_layer {

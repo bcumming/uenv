@@ -190,7 +190,7 @@ raise_layer(const layer& l, std::optional<std::string> mount, bool force,
         defaults.push_back({.name = *l.default_view});
     }
     auto img = make_composed_image_impl(
-        l.digest, l.config, {named_layer{.alias = a, .mount = m, .layer = l}},
+        l.digest(), l.config, {named_layer{.alias = a, .mount = m, .layer = l}},
         std::move(views), std::move(defaults), forced);
     if (img) {
         img->kind = uenv::image_kind::layer;
@@ -203,11 +203,11 @@ namespace {
 // the layer of an earlier item that is the same layer at the same mount point
 const named_layer* find_same(const std::vector<named_layer>& layers,
                              const named_layer& l) {
-    if (!l.layer.digest) {
+    if (!l.layer.digest()) {
         return nullptr;
     }
     for (auto& o : layers) {
-        if (o.layer.digest == l.layer.digest && o.mount == l.mount) {
+        if (o.layer.digest() == l.layer.digest() && o.mount == l.mount) {
             return &o;
         }
     }
@@ -363,7 +363,7 @@ concretise(const composed_image& img,
                 "the layer '{}' ({}) has no local file system image: pull the "
                 "image first",
                 l.alias,
-                l.layer.digest ? l.layer.digest->string() : "no digest")};
+                l.layer.digest() ? l.layer.digest()->string() : "no digest")};
         }
         result.mounts.push_back({*l.layer.store.file, l.mount});
     }

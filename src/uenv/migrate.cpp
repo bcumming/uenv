@@ -145,8 +145,8 @@ migrate_v1(const fs::path& root, migrate_options opts,
             report.errors.push_back(fmt::format("{}: {}", label, lo.error()));
             continue;
         }
-        l.digest = lo->manifest.digest;
-        l.manifest_size = lo->manifest.size();
+        l.manifest = format::layer_descriptor(lo->manifest.digest,
+                                              lo->manifest.size());
         auto img = raise_layer(l, std::nullopt, false);
         img->kind = uenv::image_kind::image;
         img->config.meta["system"] = r.system;

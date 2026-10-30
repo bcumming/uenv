@@ -24,6 +24,13 @@ blob make_blob(std::string bytes) {
     return blob{std::move(bytes), d};
 }
 
+oci::descriptor layer_descriptor(const oci::digest& digest, std::size_t size) {
+    return oci::descriptor{.media_type = std::string(oci::media_type_manifest),
+                           .digest = digest,
+                           .size = size,
+                           .artifact_type = std::string(at_layer)};
+}
+
 util::expected<std::string, error> canonical(const json& j) {
     return util::jcs(j);
 }
@@ -922,8 +929,7 @@ util::expected<layer, error> load_layer(const oci::descriptor& desc,
             fmt::format("{}: {}", desc.digest.string(), c.error())};
     }
     layer l;
-    l.digest = desc.digest;
-    l.manifest_size = body->size();
+    l.manifest = layer_descriptor(desc.digest, body->size());
     l.store.size = m->squashfs.size;
     l.store.digest = m->squashfs.digest;
     if (locate) {
@@ -1042,18 +1048,13 @@ util::expected<image_objects, error> make_image_objects(const composed_image& im
     }
     std::vector<index_entry> entries;
     for (auto& l : img.layers) {
-        if (!l.layer.digest) {
+        if (!l.layer.manifest) {
             return unexpected{fmt::format(
                 "the layer '{}' has no identity: it was not added to a "
                 "repository",
                 l.alias)};
         }
-        entries.push_back(
-            {oci::descriptor{.media_type = std::string(oci::media_type_manifest),
-                             .digest = *l.layer.digest,
-                             .size = l.layer.manifest_size,
-                             .artifact_type = std::string(at_layer)},
-             l.alias, l.mount});
+        entries.push_back({*l.layer.manifest, l.alias, l.mount});
     }
     auto index = make_index(*wrapper, entries);
     if (!index) {

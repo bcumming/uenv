@@ -407,7 +407,7 @@ TEST_CASE("1/raise: the raise of a layer", "[model]") {
     auto t = tools();
     auto img = uenv::raise_layer(t, std::nullopt, false);
     REQUIRE(img);
-    REQUIRE(img->digest == t.digest);
+    REQUIRE(img->digest == t.digest());
     REQUIRE(img->kind == uenv::image_kind::layer);
     REQUIRE(img->layers.size() == 1u);
     REQUIRE(img->layers[0].alias == "tools");
@@ -860,6 +860,31 @@ json my_env_index() {
     return json::parse(format::make_image_objects(img)->index.bytes);
 }
 } // namespace
+
+TEST_CASE("1/the composed_image model: a layer refers to its manifest by "
+          "descriptor",
+          "[oci-layout]") {
+    auto l = prgenv();
+    REQUIRE(l.manifest);
+    REQUIRE(l.manifest->size == format::make_layer_objects(l)->manifest.size());
+    REQUIRE(l.manifest->artifact_type == std::string(format::at_layer));
+    REQUIRE(l.digest() == l.manifest->digest);
+    // a layer manifest that a different tool wrote: other bytes, so a size
+    // that a new encoding of the layer config does not give. The index entry
+    // is the stored descriptor.
+    l.manifest = format::layer_descriptor(
+        oci::digest::sha256(util::sha256_string("other bytes")), 1234);
+    auto img = uenv::make_composed_image(
+        std::nullopt, my_env_config(), {{"prgenv-gnu", l.mount, l}}, {},
+        std::nullopt);
+    REQUIRE(img);
+    auto objs = format::make_image_objects(*img);
+    REQUIRE(objs);
+    auto idx = format::parse_index(objs->index.bytes);
+    REQUIRE(idx);
+    REQUIRE(idx->layers.size() == 1u);
+    REQUIRE(idx->layers[0].manifest == *l.manifest);
+}
 
 TEST_CASE("2/objects: the index of my-env", "[oci-layout]") {
     auto j = my_env_index();

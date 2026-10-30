@@ -344,7 +344,7 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
              {"relocatable", l.layer.relocatable},
              {"label", label_of(l.layer.config)},
              {"meta", l.layer.config.meta},
-             {"digest", l.layer.digest ? l.layer.digest->string() : ""},
+             {"digest", l.layer.digest() ? l.layer.digest()->string() : ""},
              {"squashfs", l.layer.store.file ? l.layer.store.file->string() : ""},
              {"views", views}});
     }

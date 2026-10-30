@@ -79,8 +79,8 @@ inline uenv::layer make_layer(std::string name, std::string mount,
     l.store.digest = oci::digest::sha256(util::sha256_string(name + mount));
     l.store.file = "/blobs/" + name;
     auto objs = uenv::format::make_layer_objects(l);
-    l.digest = objs->manifest.digest;
-    l.manifest_size = objs->manifest.size();
+    l.manifest = uenv::format::layer_descriptor(objs->manifest.digest,
+                                                objs->manifest.size());
     return l;
 }
 

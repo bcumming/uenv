@@ -263,8 +263,8 @@ add_squashfs(store& s, const fs::path& sqfs, const format::layer_config& cfg,
             return unexpected{r.error()};
         }
     }
-    l.digest = lo->manifest.digest;
-    l.manifest_size = lo->manifest.size();
+    l.manifest = format::layer_descriptor(lo->manifest.digest,
+                                          lo->manifest.size());
     if (as_layer) {
         return s.record(lo->manifest.digest, true);
     }

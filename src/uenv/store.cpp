@@ -814,7 +814,7 @@ object_record record_of(const composed_image& img, std::uint64_t size) {
     for (auto& l : img.layers) {
         r.layers.push_back(layer_ref{.alias = l.alias,
                                      .mount = l.mount,
-                                     .digest = *l.layer.digest,
+                                     .digest = *l.layer.digest(),
                                      .cfg = l.layer.config,
                                      .build_mount = l.layer.mount,
                                      .relocatable = l.layer.relocatable,
@@ -851,11 +851,11 @@ store::record(const oci::digest& top, bool standalone_layer) {
             fmt::format("sha256:{}", oci::empty_config_hex)));
     }
     for (auto& l : img->layers) {
-        auto m = format::parse_layer_manifest(*read_blob(*l.layer.digest));
+        auto m = format::parse_layer_manifest(*read_blob(*l.layer.digest()));
         if (!m) {
             return unexpected{m.error()};
         }
-        blobs.push_back(*l.layer.digest);
+        blobs.push_back(*l.layer.digest());
         blobs.push_back(m->config.digest);
         blobs.push_back(m->squashfs.digest);
     }

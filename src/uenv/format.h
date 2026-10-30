@@ -45,6 +45,9 @@ struct blob {
 };
 blob make_blob(std::string bytes);
 
+// the descriptor of a layer manifest, as an image index refers to it
+oci::descriptor layer_descriptor(const oci::digest& digest, std::size_t size);
+
 // the canonical encoding (JCS) of a JSON value
 util::expected<std::string, error> canonical(const nlohmann::json& j);
 

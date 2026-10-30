@@ -848,7 +848,7 @@ std::vector<std::string> layer_candidates(const target& t, const layer& l,
                                           context& ctx) {
     std::vector<std::string> out{t.repo(l.config.name)};
     if (auto cat = catalogue::open(t, ctx)) {
-        if (auto repos = cat->repositories_with_layer(*l.digest)) {
+        if (auto repos = cat->repositories_with_layer(*l.digest())) {
             for (auto& r : *repos) {
                 if (std::find(out.begin(), out.end(), r) == out.end()) {
                     out.push_back(r);
@@ -895,7 +895,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
 
     // 1. the blobs
     for (auto& l : img->layers) {
-        auto lm = format::parse_layer_manifest(*s.read_blob(*l.layer.digest));
+        auto lm = format::parse_layer_manifest(*s.read_blob(*l.layer.digest()));
         auto candidates = layer_candidates(t, l.layer, ctx);
         if (auto r = ensure_blob(*dst, *l.layer.store.digest, l.layer.store.size,
                                  {.file = s.blob_path(*l.layer.store.digest)},
@@ -935,11 +935,11 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     if (!is_layer) {
         std::set<std::string> done;
         for (auto& l : img->layers) {
-            if (!done.insert(l.layer.digest->string()).second) {
+            if (!done.insert(l.layer.digest()->string()).second) {
                 continue;
             }
-            if (auto r = put_manifest(*dst, l.layer.digest->string(),
-                                      *s.read_blob(*l.layer.digest),
+            if (auto r = put_manifest(*dst, l.layer.digest()->string(),
+                                      *s.read_blob(*l.layer.digest()),
                                       oci::media_type_manifest, ctx);
                 !r) {
                 return unexpected{r.error()};
@@ -968,7 +968,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     if (!is_layer) {
         std::set<std::string> done;
         for (auto& l : img->layers) {
-            if (!done.insert(l.layer.digest->string()).second) {
+            if (!done.insert(l.layer.digest()->string()).second) {
                 continue;
             }
             for (auto& repo : layer_candidates(t, l.layer, ctx)) {
@@ -979,7 +979,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
                 if (!src) {
                     continue;
                 }
-                (void)copy_referrers(*src, *dst, *l.layer.digest, "compose",
+                (void)copy_referrers(*src, *dst, *l.layer.digest(), "compose",
                                      ctx);
             }
         }
@@ -1234,10 +1234,10 @@ copy(const address& srca, const target& dstt, context& ctx,
     // the blobs of the layers
     std::set<std::string> done;
     for (auto& l : img->layers) {
-        if (!done.insert(l.layer.digest->string()).second) {
+        if (!done.insert(l.layer.digest()->string()).second) {
             continue;
         }
-        auto lm = format::parse_layer_manifest(manifests.at(l.layer.digest->string()));
+        auto lm = format::parse_layer_manifest(manifests.at(l.layer.digest()->string()));
         for (auto& [d, size] :
              {std::pair{*l.layer.store.digest, l.layer.store.size},
               std::pair{lm->config.digest, std::uint64_t(lm->config.size)}}) {
@@ -1247,8 +1247,8 @@ copy(const address& srca, const target& dstt, context& ctx,
             }
         }
         if (*kind == format::object_kind::image) {
-            if (auto r = put_manifest(*dst, l.layer.digest->string(),
-                                      manifests.at(l.layer.digest->string()),
+            if (auto r = put_manifest(*dst, l.layer.digest()->string(),
+                                      manifests.at(l.layer.digest()->string()),
                                       oci::media_type_manifest, ctx);
                 !r) {
                 return unexpected{r.error()};
@@ -1361,10 +1361,10 @@ copy(const address& srca, const target& dstt, context& ctx,
     if (*kind == format::object_kind::image) {
         std::set<std::string> rdone;
         for (auto& l : img->layers) {
-            if (!rdone.insert(l.layer.digest->string()).second) {
+            if (!rdone.insert(l.layer.digest()->string()).second) {
                 continue;
             }
-            auto r = copy_referrers(*src, *dst, *l.layer.digest,
+            auto r = copy_referrers(*src, *dst, *l.layer.digest(),
                                     same_image ? "copy" : "compose", ctx);
             if (!r) {
                 return unexpected{r.error()};
