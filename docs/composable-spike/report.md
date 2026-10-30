@@ -12,7 +12,7 @@ blob store and the order of writes held up under unit tests, fault injection
 and real mounts. They also held up against two registries: zot and
 distribution (`registry:2`).
 
-The implementation found 26 shortcomings. Most are small gaps in the text.
+The implementation found 27 shortcomings. Most are small gaps in the text.
 Six need a change to the design:
 
 1. **The runtime merge** (`uenv start a,b`) does not fit the model of an
@@ -25,7 +25,10 @@ Six need a change to the design:
 2. **The strict migration** blocks each command on a v1 repository. This
    includes the start of a squashfs file, which needs no repository. It also
    blocks each user of a read-only site repository that the site did not
-   migrate.
+   migrate. One image that fails blocks the whole repository, and a v1
+   image that the old uenv pulls later is never migrated. The change: the
+   migration writes each image directly into the v2 part, and it can run
+   again at any time.
 3. **The catalogue** (not designed yet) is the weakest part. An event log of
    tags loses events from a slow writer, a lookup trusts copies of the
    configs, and the history grows with no limit.
@@ -36,7 +39,7 @@ Six need a change to the design:
 6. **The Slurm plugin** reads `UENV_MOUNT_LIST` into 1024 bytes, which holds
    only 6 layers from the blob store. This is from the code: no test ran it.
 
-The spike fixes 13 of the shortcomings, in separate commits. Most fixes have
+The spike fixes 14 of the shortcomings, in separate commits. Most fixes have
 a test that fails before the fix and passes after it. The fixes are
 proposals for the design: the design documents are not changed.
 
@@ -115,10 +118,10 @@ design sections and their tests.
 
 | part        | file                                | cases | what it uses                       |
 | ----------- | ----------------------------------- | ----- | ---------------------------------- |
-| model       | `test/unit/v2_model.cpp`            | 39    | memory only                        |
+| model       | `test/unit/v2_model.cpp`            | 44    | memory only                        |
 | repository  | `test/unit/v2_store.cpp`            | 19    | temporary repositories, `fork`     |
 | registry    | `test/unit/v2_registry.cpp`         | 19    | a zot that the tests start         |
-| end to end  | `test/integration/composable.bats`  | 29    | the CLI, real mounts, zot          |
+| end to end  | `test/integration/composable.bats`  | 33    | the CLI, real mounts, zot          |
 
 ### What each part checks
 
@@ -152,8 +155,8 @@ design sections and their tests.
 
 | run                                                   | result                                          |
 | ----------------------------------------------------- | ----------------------------------------------- |
-| `build-v2/test/unit` (all, old and new)               | 5007 assertions pass                            |
-| `build-v2/test/bats test/composable.bats`             | 29 of 29 pass, with real mounts and zot         |
+| `build-v2/test/unit` (all, old and new)               | 5059 assertions pass                            |
+| `build-v2/test/bats test/composable.bats`             | 33 of 33 pass, with real mounts and zot         |
 | new unit tests with AddressSanitizer                  | all pass, no ASan error                         |
 | registry tests on distribution `registry:2`           | 18 of 23 pass (see R3 in section 4)             |
 | Slurm plugin                                          | builds (`build-slurm`). Not run: no cluster     |
@@ -286,6 +289,7 @@ or low (the text is not clear).
 | D2  | 6 "The migration of a local repository"  | medium   | fixed  |
 | D3  | 4 "Site rules for referrers"             | low      | open   |
 | D4  | 6 "The migration of a local repository"  | high     | fixed  |
+| D5  | 3 "Migration from v1"                    | high     | fixed  |
 
 - **D1. The strict migration blocks too much.** Each command stops on a v1
   repository. In the test environment, the default repository
@@ -309,6 +313,19 @@ or low (the text is not clear).
   squashfs file does too. The migration did not. The fix uses the same
   search, and the test `6/migration: an image with meta/ only inside the
   squashfs` fails before the fix.
+- **D5. The migration is all or nothing.** The design makes the v2 part in
+  `v2.tmp/`, and renames it only when each image is migrated. A migration
+  of a real v1 repository stopped at one image (D4). The three images that
+  it migrated could not be used, and `uenv repo status` showed the
+  repository as v1. Also, a v1 image that the old uenv pulls after the
+  migration, for example during a return to the old uenv, is never
+  migrated: a second `uenv repo migrate` stops with "already migrated". The
+  change writes each image directly into `v2/`, reports a failed image and
+  continues, and runs again at any time to add what is not migrated.
+  `uenv repo status` shows the v1 images that are not migrated. The cost:
+  an image that the user deletes from `v2/` comes back with the next
+  migration. Tests: `6/migration: a failed image does not stop the others`
+  and `6/migration: a migration that stops can continue`.
 - **D3. The site rules cannot be tested end to end.** The referrer rules are
   only in `/etc/uenv/config.toml`, which a test cannot write without root.
   The unit tests give the rules directly.
@@ -414,14 +431,16 @@ repository) and C2. The inode reuse of D2 is in `1634e42`.
 
 ### Proposed changes to the design
 
-1. **1-composition, "Merge a list at start":** the result has one default view
-   for each item, in the order of the list. The identity is the image that
-   uenv would write with no default view. The name is the aliases in the
-   order of the layers. A list of one item with no alias and no mount is the
-   item itself.
-2. **1-composition, "Nested mount points":** compose checks each nested mount
-   point with `unsquashfs`, which uenv already uses. A merge at start is not
-   checked.
+1. **1-composition, "Runtime merge":** the result of `uenv run/start a,b`
+   and `srun --uenv=a,b` is a runtime merge. It is not an image: it has no
+   identity, and uenv never stores it. It has one default view for each
+   item, in the order of the list. An item can be an image with more than
+   one layer. View names are scoped by the item, a clash of layer aliases
+   renames the later layer, and a shared layer is mounted once. A list of
+   one item with no alias and no mount is the item itself.
+2. **1-composition, "Nested mount points":** compose and the runtime merge
+   check each nested mount point with `unsquashfs`, which uenv already uses.
+   The check never runs in privileged code.
 3. **1-composition, "Image views":** compose warns about an image view `env`
    that has the build mount point of a moved layer.
 4. **3-repository and 6-migration:** a command that needs no lookup does not
@@ -429,13 +448,18 @@ repository) and C2. The inode reuse of D2 is in `1634e42`.
    warning. Thus the site must migrate its repositories before the upgrade.
 5. **6-migration:** the migration hashes each squashfs, because the v1 sha is
    not always the digest of the file. A resumed migration finds the linked
-   files by inode.
-6. **5-discovery, "The catalogue":** if the design keeps the event log, it
+   files by inode. It finds `meta/env.json` inside the squashfs when there
+   is no `meta/` next to it.
+6. **3-repository, "Migration from v1":** the migration writes each image
+   directly into `v2/`, and a failed image does not stop the others. It can
+   run again at any time, and adds only the v1 images that are not
+   migrated. `uenv repo status` shows them.
+7. **5-discovery, "The catalogue":** if the design keeps the event log, it
    needs a window and a set of seen events. A lookup checks the configs
    against the label. It also needs compaction, for example a snapshot event
    that holds the state, so that a first fill starts at the newest snapshot.
    The spike did not test compaction.
-7. **The Slurm plugin:** no fixed limit on the size of an environment
+8. **The Slurm plugin:** no fixed limit on the size of an environment
    variable.
 
 ## 6. What the spike does not cover

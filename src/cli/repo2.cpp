@@ -5,6 +5,7 @@
 #include <string>
 
 #include <fmt/core.h>
+#include <fmt/ranges.h>
 #include <nlohmann/json.hpp>
 
 #include <uenv/migrate.h>
@@ -60,9 +61,17 @@ int repo_status(const repo_args& args, const global_settings& settings) {
         term::error("no repository path is given");
         return 1;
     }
+    // the v1 images that are not in the v2 part: no hash, no write
+    unsigned pending = 0;
+    if (has_v1_part(*p)) {
+        if (auto m = migrate_v1(*p, {.dry_run = true})) {
+            pending = m->pending;
+        }
+    }
     auto state = inspect_repo(*p);
     if (state == repo_layout::v1_only) {
-        term::msg("{}: v1 format. Run `uenv repo migrate`.", p->string());
+        term::msg("{}: v1 format, {} images. Run `uenv repo migrate`.",
+                  p->string(), pending);
         return 0;
     }
     auto s = store::open(*p, true);
@@ -83,7 +92,8 @@ int repo_status(const repo_args& args, const global_settings& settings) {
                          {"prune", r->pruned.size()},
                          {"recent", r->kept_recent.size()},
                          {"parts", r->parts.size()},
-                         {"released", r->released}};
+                         {"released", r->released},
+                         {"v1_not_migrated", pending}};
         term::msg("{}", j.dump());
         return 0;
     }
@@ -96,6 +106,10 @@ int repo_status(const repo_args& args, const global_settings& settings) {
               ".part files; {} unused blobs are newer than 24 hours",
               r->pruned.size(), r->released, r->parts.size(),
               r->kept_recent.size());
+    if (pending) {
+        term::msg("  {} v1 images are not migrated: run `uenv repo migrate`",
+                  pending);
+    }
     return 0;
 }
 
@@ -128,7 +142,7 @@ int repo_migrate(const repo_args& args, const global_settings& settings) {
         term::error("no repository path is given");
         return 1;
     }
-    auto r = migrate_v1(*p, true,
+    auto r = migrate_v1(*p, {},
                         [](const std::string& m) { term::msg("{}", m); });
     if (!r) {
         term::error("{}", r.error());
@@ -136,6 +150,13 @@ int repo_migrate(const repo_args& args, const global_settings& settings) {
     }
     term::msg("migrated {} images ({} already done, {} squashfs hashed)",
               r->migrated, r->skipped, r->hashed);
+    if (r->failed) {
+        term::error("{} images were not migrated. The other images can be "
+                    "used. Run `uenv repo migrate` again after the problem is "
+                    "fixed.\n{}",
+                    r->failed, fmt::join(r->errors, "\n"));
+        return 1;
+    }
     return 0;
 }
 

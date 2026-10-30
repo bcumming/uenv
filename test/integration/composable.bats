@@ -473,14 +473,54 @@ PY
     cp -a "$V1_FIXTURE" "$TMP/v1repo"
     run env UENV_TEST_FAULT=migrate-after-link uenv repo migrate "$TMP/v1repo"
     assert_equal "$status" "99"
-    [[ -d "$TMP/v1repo/v2.tmp" ]]
-    [[ ! -d "$TMP/v1repo/v2" ]]
-    run uenv --repo="$TMP/v1repo" image ls
-    assert_failure
+    # the v2 part is usable at once: the stop left no image in it
+    run uenv --repo="$TMP/v1repo" image ls --no-header
+    assert_success
+    run uenv repo status "$TMP/v1repo"
+    assert_output --partial "3 v1 images are not migrated"
     run uenv repo migrate "$TMP/v1repo"
     assert_success
     # the squashfs that the stopped migration linked is not hashed again
     assert_output --partial "migrated 3 images (0 already done, 2 squashfs hashed)"
+}
+
+@test "6/migration: a v2.tmp of an earlier migration is used" {
+    cp -a "$V1_FIXTURE" "$TMP/v1repo"
+    uenv repo migrate "$TMP/v1repo"
+    mv "$TMP/v1repo/v2" "$TMP/v1repo/v2.tmp"
+    run uenv repo migrate "$TMP/v1repo"
+    assert_success
+    assert_output --partial "migrated 0 images (3 already done"
+    [[ -d "$TMP/v1repo/v2" && ! -e "$TMP/v1repo/v2.tmp" ]]
+}
+
+@test "6/migration: a failed image does not stop the others" {
+    cp -a "$V1_FIXTURE" "$TMP/v1repo"
+    run uenv repo status "$TMP/v1repo"
+    assert_output --partial "v1 format, 3 images"
+    # one squashfs that uenv cannot read
+    local bad=$(ls "$TMP"/v1repo/images/*/store.squashfs | head -1)
+    chmod 000 "$bad"
+    run uenv repo migrate "$TMP/v1repo"
+    chmod 644 "$bad"
+    assert_failure
+    assert_output --partial "migrated 2 images"
+    assert_output --partial "1 images were not migrated. The other images can be used."
+    # the migrated images can be used
+    run uenv --repo="$TMP/v1repo" image ls --no-header
+    assert_success
+    assert_equal "$(echo "$output" | grep -c 'v1')" "2"
+    run uenv repo status "$TMP/v1repo"
+    assert_output --partial "1 v1 images are not migrated"
+    # a later migration adds only the image that is not migrated
+    run uenv repo migrate "$TMP/v1repo"
+    assert_success
+    assert_output --partial "migrated 1 images (2 already done, 1 squashfs hashed)"
+    run uenv repo status "$TMP/v1repo"
+    refute_output --partial "not migrated"
+    run uenv repo migrate "$TMP/v1repo"
+    assert_success
+    assert_output --partial "migrated 0 images (3 already done, 0 squashfs hashed)"
 }
 
 #

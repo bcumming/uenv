@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 
 #include <fmt/core.h>
@@ -22,17 +23,29 @@ namespace uenv {
 namespace fs = std::filesystem;
 using util::unexpected;
 
+bool has_v1_part(const fs::path& root) {
+    std::error_code ec;
+    return fs::is_regular_file(root / "index.db", ec);
+}
+
 util::expected<migrate_report, std::string>
-migrate_v1(const fs::path& root, bool reuse_links,
+migrate_v1(const fs::path& root, migrate_options opts,
            std::function<void(const std::string&)> log) {
-    auto state = inspect_repo(root);
-    if (state == repo_layout::v2) {
-        return unexpected{
-            fmt::format("the repository {} is already migrated", root.string())};
+    if (!has_v1_part(root)) {
+        return unexpected{fmt::format(
+            "{} has no v1 part: there is nothing to migrate", root.string())};
     }
-    if (state != repo_layout::v1_only) {
-        return unexpected{
-            fmt::format("{} is not a v1 repository", root.string())};
+    std::error_code ec;
+    // a migration of an earlier version of the spike made the v2 part in
+    // v2.tmp, and renamed it at the end: continue in it
+    if (!opts.dry_run && fs::is_directory(root / "v2.tmp", ec) &&
+        !fs::exists(root / "v2", ec)) {
+        fs::rename(root / "v2.tmp", root / "v2", ec);
+        if (ec) {
+            return unexpected{fmt::format("unable to rename {}: {}",
+                                          (root / "v2.tmp").string(),
+                                          ec.message())};
+        }
     }
     auto v1 = open_repository(root, repo_open_mode::readonly);
     if (!v1) {
@@ -42,15 +55,27 @@ migrate_v1(const fs::path& root, bool reuse_links,
     if (!records) {
         return unexpected{records.error()};
     }
-    auto s = store::create_in(root, "v2.tmp");
-    if (!s) {
-        return unexpected{s.error()};
+    // the v2 part: made by the first migration. A dry run writes nothing,
+    // and with no v2 part each v1 image is pending.
+    std::optional<store> s;
+    if (!opts.dry_run) {
+        auto c = store::create_in(root, "v2");
+        if (!c) {
+            return unexpected{c.error()};
+        }
+        s = std::move(*c);
+    } else if (inspect_repo(root) == repo_layout::v2) {
+        auto o = store::open(root, true);
+        if (!o) {
+            return unexpected{o.error()};
+        }
+        s = std::move(*o);
     }
     migrate_report report;
 
     // the blobs that an earlier migration linked: by inode
     std::map<std::pair<dev_t, ino_t>, oci::digest> linked;
-    if (reuse_links) {
+    if (s && opts.reuse_links) {
         std::error_code ec;
         for (auto& e : fs::directory_iterator(s->v2() / "blobs" / "sha256", ec)) {
             struct stat st {};
@@ -64,6 +89,10 @@ migrate_v1(const fs::path& root, bool reuse_links,
     }
 
     for (auto& r : *records) {
+        if (!s) {
+            report.pending++;
+            continue;
+        }
         auto paths = v1->uenv_paths(r.sha);
         auto label = fmt::format("{}/{}:{}@{}%{}", r.name, r.version, r.tag,
                                  r.system, r.uarch);
@@ -83,6 +112,11 @@ migrate_v1(const fs::path& root, bool reuse_links,
                 it != linked.end()) {
                 sqfs = it->second;
             }
+        }
+        if (!sqfs && opts.dry_run) {
+            // a squashfs that no migration linked: not in the v2 part
+            report.pending++;
+            continue;
         }
         if (!sqfs) {
             auto h = util::sha256_file(paths.squashfs);
@@ -127,6 +161,10 @@ migrate_v1(const fs::path& root, bool reuse_links,
             report.skipped++;
             continue;
         }
+        if (opts.dry_run) {
+            report.pending++;
+            continue;
+        }
         // blobs first: a hard link, no copy
         if (auto x = s->link_file(paths.squashfs, *sqfs); !x) {
             report.failed++;
@@ -153,21 +191,10 @@ migrate_v1(const fs::path& root, bool reuse_links,
                             format::short_id(objs->index.digest)));
         }
     }
-    if (report.failed) {
-        return unexpected{fmt::format(
-            "{} images were not migrated: the migration is not complete. "
-            "Run it again after the problem is fixed.\n{}",
-            report.failed, fmt::format("{}", fmt::join(report.errors, "\n")))};
-    }
-    if (auto x = s->write_index_json(); !x) {
-        return unexpected{x.error()};
-    }
-    test_fault("migrate-before-rename");
-    std::error_code ec;
-    fs::rename(root / "v2.tmp", root / "v2", ec);
-    if (ec) {
-        return unexpected{fmt::format("unable to rename {}: {}",
-                                      (root / "v2.tmp").string(), ec.message())};
+    if (!opts.dry_run) {
+        if (auto x = s->write_index_json(); !x) {
+            return unexpected{x.error()};
+        }
     }
     return report;
 }
