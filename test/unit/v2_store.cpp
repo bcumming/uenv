@@ -14,6 +14,7 @@
 
 #include <uenv/format.h>
 #include <uenv/ops.h>
+#include <uenv/session.h>
 #include <uenv/store.h>
 #include <util/fs.h>
 #include <util/sqlite.h>
@@ -456,4 +457,26 @@ TEST_CASE("1/compose: a relocatable layer with an absolute path is refused",
     // add refuses it
     REQUIRE(!uenv::add_squashfs(s, fake_sqfs(tmpdir(), "bad"), cfg_of(bad), {},
                                 true));
+}
+
+TEST_CASE("6/rollout: a read-only v1 repository does not block a v2 one",
+          "[store]") {
+    auto site = tmpdir() / "site";
+    write_file(site / "index.db", "");
+    fs::create_directories(site / "images");
+    auto user = tmpdir() / "user";
+    REQUIRE(uenv::store::create(user));
+    uenv::configuration cfg;
+    cfg.repos.accumulate(std::vector<uenv::repo_description>{
+        {.name = "user", .path = user}, {.name = "site", .path = site}});
+    // writable v1: an error that tells the user to migrate
+    auto w = uenv::open_stores(cfg);
+    REQUIRE(!w);
+    REQUIRE(w.error().find("migrate") != std::string::npos);
+    // read only v1: skipped
+    fs::permissions(site, fs::perms::owner_write, fs::perm_options::remove);
+    auto r = uenv::open_stores(cfg);
+    fs::permissions(site, fs::perms::owner_write, fs::perm_options::add);
+    REQUIRE(r);
+    REQUIRE(r->size() == 1u);
 }

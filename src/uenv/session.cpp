@@ -1,3 +1,5 @@
+#include <unistd.h>
+
 #include <algorithm>
 #include <filesystem>
 #include <string>
@@ -26,6 +28,15 @@ util::expected<std::vector<store>, std::string>
 open_stores(const configuration& config, bool readonly) {
     std::vector<store> stores;
     for (auto& r : config.repos) {
+        // a v1 repository that the user cannot write, for example one that a
+        // site provides, is skipped: the user cannot migrate it
+        if (inspect_repo(r.path) == repo_layout::v1_only &&
+            ::access(r.path.c_str(), W_OK) != 0) {
+            spdlog::warn("the repository {} is in the v1 format and is read "
+                         "only: it is ignored until it is migrated",
+                         r.path.string());
+            continue;
+        }
         auto s = store::open(r.path, readonly);
         if (!s) {
             return unexpected{s.error()};
