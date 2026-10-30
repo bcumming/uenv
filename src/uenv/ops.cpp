@@ -446,6 +446,14 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
     return write_image(s, *img);
 }
 
+std::optional<oci::digest> merged_digest(const composed_image& img) {
+    // the default views of a merge are a choice at start, one for each item,
+    // and an image config holds only one: the identity leaves them out
+    auto copy = img;
+    copy.default_views.clear();
+    return format::image_digest(copy);
+}
+
 util::expected<composed_image, std::string>
 resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
               bool force) {
@@ -485,9 +493,7 @@ resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
         }
         merge.push_back(std::move(m));
     }
-    return merge_items(std::move(merge), [](const composed_image& img) {
-        return format::image_digest(img);
-    });
+    return merge_items(std::move(merge), merged_digest);
 }
 
 } // namespace uenv

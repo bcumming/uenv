@@ -101,6 +101,10 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
 // build mount point of a layer that the image moves
 std::vector<std::string> compose_warnings(const composed_image& img);
 
+// the identity of a merged list: the image that uenv would write, with no
+// default view
+std::optional<oci::digest> merged_digest(const composed_image& img);
+
 // resolve a list for start/run, and merge it into one composed_image
 util::expected<composed_image, std::string>
 resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,

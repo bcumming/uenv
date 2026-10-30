@@ -13,6 +13,7 @@
 #include <oci/manifest.h>
 #include <uenv/format.h>
 #include <uenv/model.h>
+#include <uenv/ops.h>
 #include <util/envvars.h>
 #include <util/jcs.h>
 
@@ -523,6 +524,15 @@ TEST_CASE("1/merge: the digest of a merged list", "[model]") {
     // so the image that uenv "would write" does not exist, and the merge has
     // no digest.
     REQUIRE(!b->digest);
+
+    // the fix: the identity of a merge leaves out the default views
+    auto fixed = uenv::merge_items(two_defaults, uenv::merged_digest);
+    REQUIRE(fixed->digest);
+    REQUIRE(fixed->default_views.size() == 2u);
+    // the same list in a different order: the same identity
+    std::vector<uenv::merge_item> reversed{two_defaults[1], two_defaults[0]};
+    REQUIRE(uenv::merge_items(reversed, uenv::merged_digest)->digest ==
+            fixed->digest);
 }
 
 //
