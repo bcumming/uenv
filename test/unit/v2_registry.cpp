@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -98,7 +99,13 @@ struct zot {
                 (state / "registry").string(), storage_extra, port,
                 (state / "zot.log").string());
         }
-        auto p = util::run({zot_binary(), "serve", cfg.string()});
+        // zot writes to stdout and stderr: send them to a file. A pipe that
+        // no one reads fills up after some 64 kB, and zot then blocks in a
+        // request while it holds the lock of a repository
+        auto p = util::run(
+            {"/bin/sh", "-c",
+             fmt::format("exec '{}' serve '{}' > '{}' 2>&1", zot_binary(),
+                         cfg.string(), (state / "zot.out").string())});
         if (!p) {
             return;
         }
@@ -765,4 +772,42 @@ TEST_CASE("5/catalogue: an event that does not match the configs",
     REQUIRE(!p);
     REQUIRE(p.error().find("catalogue is not correct") != std::string::npos);
     REQUIRE(e->ctx.st.downloaded == 0u);
+}
+
+TEST_CASE("5/catalogue: the cost of a first fill grows with the history",
+          "[.bench][catalogue]") {
+    REQUIRE_ZOT();
+    auto e = make_env(shared_zot().base);
+    auto t = *reg::resolve_target(e->cfg, {});
+    auto s = new_store();
+    auto img = add_image(s, tools());
+    auto cat = *reg::catalogue::open(t, e->ctx);
+    unsigned total = 0;
+    for (unsigned batch = 0; batch < 8; ++batch) {
+        // the history: one event for each push, copy or delete
+        auto start = std::chrono::steady_clock::now();
+        for (unsigned i = 0; i < 50; ++i, ++total) {
+            auto rec = img;
+            rec.cfg.version = fmt::format("{}", total);
+            REQUIRE(cat.append({"add", "x/tools", "t", rec}));
+        }
+        auto append = std::chrono::duration<double>(
+                          std::chrono::steady_clock::now() - start)
+                          .count();
+        reg::context reader;
+        reader.cfg = &e->cfg;
+        reader.cache = *util::make_temp_dir();
+        auto c = *reg::catalogue::open(t, reader);
+        start = std::chrono::steady_clock::now();
+        auto r = c.refresh();
+        auto first = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - start)
+                         .count();
+        auto again = c.refresh();
+        WARN(fmt::format("events={} 50 appends: {:.2f}s ({:.0f} ms each); "
+                         "first fill: {} requests {:.2f}s; refresh: {} "
+                         "requests",
+                         r->events, append, append * 20, r->requests, first,
+                         again->requests));
+    }
 }
