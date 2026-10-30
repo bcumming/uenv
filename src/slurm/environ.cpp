@@ -1,3 +1,4 @@
+#include <vector>
 #include "environ.h"
 
 #include <optional>
@@ -19,21 +20,25 @@ namespace uenv::slurm {
 
 // wrapper spank_getenv : for use in the remote context
 std::optional<std::string> getenv_wrapper(spank_t sp, const char* var) {
-    const int len = 1024;
-    char buf[len];
-
-    const auto ret = spank_getenv(sp, var, buf, len);
-
-    if (ret == ESPANK_ENV_NOEXIST) {
-        return std::nullopt;
+    // UENV_MOUNT_LIST has one entry of some 150 characters for each layer:
+    // a fixed buffer of 1024 bytes holds only 6 layers. Grow the buffer
+    // while spank_getenv reports that the value does not fit.
+    for (std::size_t len = 1024; len <= (1u << 20); len *= 4) {
+        std::vector<char> buf(len);
+        const auto ret = spank_getenv(sp, var, buf.data(), int(len));
+        if (ret == ESPANK_ENV_NOEXIST) {
+            return std::nullopt;
+        }
+        if (ret == ESPANK_SUCCESS) {
+            return std::string{buf.data()};
+        }
+        if (ret != ESPANK_NOSPACE) {
+            slurm_spank_log("getenv failed");
+            throw ret;
+        }
     }
-
-    if (ret == ESPANK_SUCCESS) {
-        return std::string{buf};
-    }
-
-    slurm_spank_log("getenv failed");
-    throw ret;
+    slurm_spank_log("getenv failed: the value of %s is too long", var);
+    throw ESPANK_NOSPACE;
 }
 
 bool in_slurm_uenv_session(const envvars::state& env) {
