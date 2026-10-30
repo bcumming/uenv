@@ -18,7 +18,7 @@ namespace uenv::slurm {
 // wrapper spank_getenv : for use in the remote context
 std::optional<std::string> getenv_wrapper(spank_t sp, const char* var);
 
-void patch_slurm_environment(const uenv::env&, const envvars::state&,
+void patch_slurm_environment(const envvars::state&, const envvars::state&,
                              const arg_pack&);
 
 bool in_slurm_uenv_session(const envvars::state& env);

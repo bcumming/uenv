@@ -15,7 +15,7 @@
 #include <uenv/store.h>
 #include <util/expected.h>
 
-#include "session.h"
+#include <uenv/session.h>
 
 namespace uenv {
 
@@ -23,9 +23,9 @@ namespace fs = std::filesystem;
 using util::unexpected;
 
 util::expected<std::vector<store>, std::string>
-open_stores(const global_settings& settings, bool readonly) {
+open_stores(const configuration& config, bool readonly) {
     std::vector<store> stores;
-    for (auto& r : settings.config.repos) {
+    for (auto& r : config.repos) {
         auto s = store::open(r.path, readonly);
         if (!s) {
             return unexpected{s.error()};
@@ -36,8 +36,8 @@ open_stores(const global_settings& settings, bool readonly) {
 }
 
 util::expected<store, std::string>
-open_user_store(const global_settings& settings) {
-    auto repo = settings.config.user_repo();
+open_user_store(const configuration& config) {
+    auto repo = config.user_repo();
     if (!repo) {
         return unexpected{std::string{
             "there is no repository: give one with --repo, or in the "
@@ -46,8 +46,8 @@ open_user_store(const global_settings& settings) {
     return store::create(repo->path);
 }
 
-label_keys keys_of(const global_settings& settings) {
-    return label_keys{settings.config.label.at, settings.config.label.percent};
+label_keys keys_of(const configuration& config) {
+    return label_keys{config.label.at, config.label.percent};
 }
 
 namespace {
@@ -75,10 +75,10 @@ std::vector<std::string> split_views(const std::string& s) {
 util::expected<session, std::string>
 prepare_session(const std::string& uenv_arg,
                 const std::optional<std::string>& view_arg,
-                bool no_default_view, bool force,
-                const global_settings& settings) {
-    auto items = parse_item_list(uenv_arg, keys_of(settings),
-                                 settings.config.system_name);
+                bool no_default_view, bool force, const configuration& config,
+                const envvars::state& calling_environment,
+                std::optional<std::string> forward_prefix) {
+    auto items = parse_item_list(uenv_arg, keys_of(config), config.system_name);
     if (!items) {
         return unexpected{items.error()};
     }
@@ -88,7 +88,7 @@ prepare_session(const std::string& uenv_arg,
     util::expected<std::vector<store>, std::string> stores = std::move(no_stores);
     if (std::any_of(items->begin(), items->end(),
                     [](auto& i) { return !i.file; })) {
-        stores = open_stores(settings);
+        stores = open_stores(config);
         if (!stores) {
             return unexpected{stores.error()};
         }
@@ -120,7 +120,7 @@ prepare_session(const std::string& uenv_arg,
         }
     }
     session out{.image = *img, .concrete = *c, .views = views};
-    out.environment = settings.calling_environment;
+    out.environment = calling_environment;
     auto patches = c->patches;
     patches.push_back(session_patch(*c, views));
     apply_patches(out.environment, patches);
@@ -156,7 +156,9 @@ prepare_session(const std::string& uenv_arg,
         tel.push_back(e);
     }
     out.environment.set("UENV_TELEMETRY", tel.dump());
-    forward_unsecure_variables(out.environment, "SQFSMNT_FWD_");
+    if (forward_prefix) {
+        forward_unsecure_variables(out.environment, *forward_prefix);
+    }
     for (auto& [file, mount] : c->mounts) {
         out.mounts.push_back(fmt::format("{}:{}", file.string(), mount));
     }

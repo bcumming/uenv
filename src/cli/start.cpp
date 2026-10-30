@@ -13,7 +13,7 @@
 #include <util/shell.h>
 
 #include "help.h"
-#include "session.h"
+#include <uenv/session.h>
 #include "start.h"
 #include "terminal.h"
 #include "uenv.h"
@@ -127,7 +127,8 @@ will not work, because it starts a new interactive shell.)",
     auto session = prepare_session(args.uenv_description,
                                    args.view_description,
                                    args.disable_default_view, args.force,
-                                   settings);
+                                   settings.config,
+                                   settings.calling_environment);
     if (!session) {
         term::error("{}", session.error());
         term::hint("{}",

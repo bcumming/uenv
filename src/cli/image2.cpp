@@ -22,7 +22,7 @@
 
 #include "help.h"
 #include "image2.h"
-#include "session.h"
+#include <uenv/session.h>
 #include "terminal.h"
 #include "uenv.h"
 #include "util.h"
@@ -122,7 +122,7 @@ registry::context make_context(const global_settings& settings,
                                std::optional<std::string> registry_option) {
     registry::context ctx;
     ctx.cfg = &settings.config;
-    ctx.keys = keys_of(settings);
+    ctx.keys = keys_of(settings.config);
     ctx.default_system = settings.config.system_name;
     auto cache = user_cache_path(settings.calling_environment);
     ctx.cache = cache ? *cache : fs::temp_directory_path() / "uenv-cache";
@@ -148,7 +148,7 @@ struct ls_args {
 };
 
 int image_ls(const ls_args& args, const global_settings& settings) {
-    auto stores = open_stores(settings);
+    auto stores = open_stores(settings.config);
     if (!stores) {
         term::error("{}", stores.error());
         return 1;
@@ -158,7 +158,7 @@ int image_ls(const ls_args& args, const global_settings& settings) {
     if (text == "+") {
         q.layer = true;
     } else if (!text.empty()) {
-        auto p = parse_label_query(text, keys_of(settings),
+        auto p = parse_label_query(text, keys_of(settings.config),
                                    settings.config.system_name);
         if (!p) {
             term::error("{}", p.error());
@@ -192,7 +192,7 @@ struct add_args {
 };
 
 int image_add(const add_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings);
+    auto s = open_user_store(settings.config);
     if (!s) {
         term::error("{}", s.error());
         return 1;
@@ -269,12 +269,12 @@ struct rm_args {
 };
 
 int image_rm(const rm_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings);
+    auto s = open_user_store(settings.config);
     if (!s) {
         term::error("{}", s.error());
         return 1;
     }
-    auto q = parse_label_query(args.label, keys_of(settings));
+    auto q = parse_label_query(args.label, keys_of(settings.config));
     if (!q) {
         term::error("{}", q.error());
         return 1;
@@ -315,12 +315,12 @@ json env_json_of(const envvars::patch& p) {
 }
 
 int image_inspect(const inspect_args& args, const global_settings& settings) {
-    auto stores = open_stores(settings);
+    auto stores = open_stores(settings.config);
     if (!stores) {
         term::error("{}", stores.error());
         return 1;
     }
-    auto items = parse_item_list(args.uenv, keys_of(settings),
+    auto items = parse_item_list(args.uenv, keys_of(settings.config),
                                  settings.config.system_name);
     if (!items) {
         term::error("{}", items.error());
@@ -391,7 +391,7 @@ struct compose_args {
 };
 
 int image_compose(const compose_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings);
+    auto s = open_user_store(settings.config);
     if (!s) {
         term::error("{}", s.error());
         return 1;
@@ -406,7 +406,7 @@ int image_compose(const compose_args& args, const global_settings& settings) {
         term::error("{} is not valid JSON", args.file);
         return 1;
     }
-    auto r = compose(*s, spec, keys_of(settings));
+    auto r = compose(*s, spec, keys_of(settings.config));
     if (!r) {
         term::error("{}", r.error());
         return 1;
@@ -453,7 +453,7 @@ int image_find(const find_args& args, const global_settings& settings) {
     if (label == "+") {
         q.layer = true;
     } else if (!label.empty()) {
-        auto p = parse_label_query(label, keys_of(settings),
+        auto p = parse_label_query(label, keys_of(settings.config),
                                    settings.config.system_name);
         if (!p) {
             term::error("{}", p.error());
@@ -482,7 +482,7 @@ struct pull_args {
 };
 
 int image_pull(const pull_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings);
+    auto s = open_user_store(settings.config);
     if (!s) {
         term::error("{}", s.error());
         return 1;
@@ -540,12 +540,12 @@ int image_push(const push_args& args, const global_settings& settings) {
     if (fs::is_directory(args.source, ec)) {
         r = registry::push_layout(args.source, *t, ctx);
     } else {
-        auto stores = open_stores(settings);
+        auto stores = open_stores(settings.config);
         if (!stores) {
             term::error("{}", stores.error());
             return 1;
         }
-        auto q = parse_label_query(args.source, keys_of(settings),
+        auto q = parse_label_query(args.source, keys_of(settings.config),
                                    settings.config.system_name);
         if (!q) {
             term::error("{}", q.error());

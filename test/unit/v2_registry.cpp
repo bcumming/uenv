@@ -82,7 +82,10 @@ struct zot {
     std::string base;
     fs::path state;
 
-    explicit zot(std::string storage_extra = "") {
+    explicit zot(std::string storage_extra = "", bool start = true) {
+        if (!start) {
+            return;
+        }
         const int port = free_port();
         state = util::make_temp_dir().value();
         const auto cfg = state / "config.json";
@@ -113,6 +116,7 @@ struct zot {
         }
         p->kill();
     }
+    zot(zot&&) = default;
     ~zot() {
         if (proc) {
             proc->kill();
@@ -120,8 +124,17 @@ struct zot {
     }
 };
 
+// UENV_TEST_REGISTRY=http://host:port runs the tests against a different
+// registry, for example distribution (registry:2), started by the caller
 zot& shared_zot() {
-    static zot z;
+    static zot z = [] {
+        if (const char* r = std::getenv("UENV_TEST_REGISTRY")) {
+            zot external(std::string{}, false);
+            external.base = r;
+            return external;
+        }
+        return zot{};
+    }();
     return z;
 }
 
@@ -304,6 +317,10 @@ TEST_CASE("4/push of a layer is a building block, compose mounts its blobs",
     // the squashfs files are not uploaded again. zot reports a blob of a
     // different repository as present (dedupe), so the mount is not needed
     // on zot: FINDING (zot-dedupe)
+    WARN(fmt::format("compose push: mounted={} skipped={} uploaded={} "
+                     "uploaded_bytes={}",
+                     e->ctx.st.mounted, e->ctx.st.skipped, e->ctx.st.uploaded,
+                     e->ctx.st.uploaded_bytes));
     REQUIRE(e->ctx.st.mounted + e->ctx.st.skipped >= 2u);
     REQUIRE(e->ctx.st.uploaded_bytes < 10000u);
 

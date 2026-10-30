@@ -11,6 +11,7 @@
 
 #include <uenv/config.h>
 #include <uenv/env.h>
+#include <uenv/session.h>
 #include <uenv/log.h>
 #include <uenv/mount.h>
 #include <uenv/parse.h>
@@ -393,15 +394,10 @@ int init_post_opt_local_allocator(spank_t sp [[maybe_unused]]) {
             const auto repo_var = calling_environment.get("UENV_REPO");
             const auto uenv_var = calling_environment.get("UENV_LABEL");
             std::string view_forwarded;
+            // UENV_VIEW is the list of views as the user gave it: it is
+            // forwarded with no conversion
             if (view_var) {
-                if (const auto r =
-                        uenv::parse_env_view_description(view_var.value())) {
-                    view_forwarded = view_var.value();
-                } else {
-                    // do not treat this as a hard error, but log it clearly.
-                    slurm_error("UENV_VIEW is malformed, ignoring: %s",
-                                r.error().message().c_str());
-                }
+                view_forwarded = view_var.value();
             }
             ::setenv("SLURM_UENV", uenv_var.value_or("").c_str(), 1);
             ::setenv("SLURM_UENV_VIEW", view_forwarded.c_str(), 1);
@@ -438,31 +434,24 @@ int init_post_opt_local_allocator(spank_t sp [[maybe_unused]]) {
             return -ESPANK_ERROR;
         }
 
-        const auto resolved =
-            uenv::resolve_uenv_args(args.uenv_description.value(),
-                                    config_g.repos, config_g.system_name);
-        if (!resolved) {
-            slurm_error("%s", resolved.error().c_str());
+        // the composed model: resolve the list, merge it, concretise it,
+        // and apply the patches in order (1-composition.md)
+        auto session = uenv::prepare_session(
+            args.uenv_description.value(), args.view_description,
+            !args.use_default_views, false, config_g, calling_environment,
+            std::nullopt);
+        if (!session) {
+            slurm_error("%s", session.error().c_str());
             return -ESPANK_ERROR;
         }
 
-        const auto env =
-            uenv::concretise_env(resolved.value(), args.view_description,
-                                 args.uenv_description.value(), config_g.repos,
-                                 args.use_default_views);
+        // set and unset each variable that the session changes
+        patch_slurm_environment(session->environment, calling_environment,
+                                args);
 
-        if (!env) {
-            slurm_error("%s", env.error().c_str());
-            return -ESPANK_ERROR;
+        if (auto t = uenv::telemetry_from_env(session->environment)) {
+            telemetry_g = *t;
         }
-
-        // patch the environment variables in the calling environment: calls
-        // the setenv and unsetenv to adjust the variables in the calling
-        // environment.
-        // Also sets SLURM_UENV* variables.
-        patch_slurm_environment(*env, calling_environment, args);
-
-        telemetry_g = uenv::make_telemetry(*env);
     }
 
     return ESPANK_SUCCESS;

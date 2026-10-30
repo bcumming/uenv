@@ -14,7 +14,7 @@
 #include <util/subprocess.h>
 
 #include "help.h"
-#include "session.h"
+#include <uenv/session.h>
 #include "run.h"
 #include "terminal.h"
 #include "uenv.h"
@@ -104,7 +104,8 @@ You need to finish the current session by typing 'exit' or hitting '<ctrl-d>'.)"
     auto session = prepare_session(args.uenv_description,
                                    args.view_description,
                                    args.disable_default_view, args.force,
-                                   settings);
+                                   settings.config,
+                                   settings.calling_environment);
     if (!session) {
         term::error("{}", session.error());
         term::hint("{}",

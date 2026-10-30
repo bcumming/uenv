@@ -44,29 +44,18 @@ bool in_slurm_uenv_session(const envvars::state& env) {
 // note: making this into a nice clean function that returns state that can be
 // used by the calling slurm plugin was too hard - because slurm requires that
 // the use of setenv/getenv/unsetenv or spank_getenv/spank_setenv/spank_unsetenv
-void patch_slurm_environment(const uenv::env& environment,
+void patch_slurm_environment(const envvars::state& full_env,
                              envvars::state const& base, const arg_pack& args) {
-    // create the full environment with all patches applied
-    envvars::state full_env =
-        generate_environment(environment, base, std::nullopt);
-
-    // get the patch that was applied
-    auto patch = environment.patch();
-
-    // iterate over all variables in the patch:
-    // - if the variable was unset: unset it in the calling environment
-    // - if the variable was set: apply the new value to the calling environment
-    for (auto& [name, _] : patch.scalars()) {
-        if (auto value = full_env.get(name)) {
-            setenv(name.c_str(), value->c_str(), 1);
-        } else {
-            unsetenv(name.c_str());
+    // set each variable whose value changed, and unset each variable that
+    // the session removed
+    for (auto& [name, value] : full_env.variables()) {
+        auto old = base.get(name);
+        if (!old || *old != value) {
+            setenv(name.c_str(), value.c_str(), 1);
         }
     }
-    for (auto& [name, var] : patch.prefix_paths()) {
-        if (auto value = full_env.get(name)) {
-            setenv(name.c_str(), value->c_str(), 1);
-        } else {
+    for (auto& [name, _] : base.variables()) {
+        if (!full_env.get(name)) {
             unsetenv(name.c_str());
         }
     }

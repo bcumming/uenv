@@ -10,18 +10,18 @@
 #include <util/envvars.h>
 #include <util/expected.h>
 
-#include "uenv.h"
+#include <uenv/settings.h>
 
 namespace uenv {
 
 // open the repositories of the configuration, in order
 util::expected<std::vector<store>, std::string>
-open_stores(const global_settings& settings, bool readonly = true);
+open_stores(const configuration& config, bool readonly = true);
 
 // open (or create) the repository that the user writes
-util::expected<store, std::string> open_user_store(const global_settings& settings);
+util::expected<store, std::string> open_user_store(const configuration& config);
 
-label_keys keys_of(const global_settings& settings);
+label_keys keys_of(const configuration& config);
 
 struct session {
     composed_image image;
@@ -36,7 +36,8 @@ struct session {
 util::expected<session, std::string>
 prepare_session(const std::string& uenv_arg,
                 const std::optional<std::string>& view_arg,
-                bool no_default_view, bool force,
-                const global_settings& settings);
+                bool no_default_view, bool force, const configuration& config,
+                const envvars::state& calling_environment,
+                std::optional<std::string> forward_prefix = "SQFSMNT_FWD_");
 
 } // namespace uenv
