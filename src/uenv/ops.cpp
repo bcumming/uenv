@@ -331,13 +331,13 @@ add_squashfs(store& s, const fs::path& sqfs, const layer_config& cfg,
         return s.record(lo->manifest.digest, true);
     }
     // 2. promote the layer to an image
-    auto img = raise_layer(*l, std::nullopt, false);
+    auto raised = raise_layer(*l, std::nullopt, false);
+    if (!raised) {
+        return unexpected{raised.error()};
+    }
+    auto img = promote(std::move(*raised), image_meta);
     if (!img) {
         return unexpected{img.error()};
-    }
-    img->kind = uenv::image_kind::image;
-    for (auto& [k, v] : image_meta) {
-        img->config.meta[k] = v;
     }
     // 3. and 4.: store the blobs, then record the image
     return write_image(s, *img);
@@ -383,11 +383,11 @@ find_unique(std::vector<store>& stores, const label_query& q,
 
 util::expected<void, std::string> check_nested_mounts(const composed_image& img) {
     // the layers are sorted, so each parent comes before the layers in it
-    for (std::size_t i = 0; i < img.layers.size(); ++i) {
-        auto& child = img.layers[i];
+    for (std::size_t i = 0; i < img.layers().size(); ++i) {
+        auto& child = img.layers()[i];
         const named_layer* parent = nullptr;
         for (std::size_t j = 0; j < i; ++j) {
-            auto& p = img.layers[j];
+            auto& p = img.layers()[j];
             if (child.mount.is_inside(p.mount) &&
                 (!parent || p.mount.is_inside(parent->mount))) {
                 parent = &p;
@@ -475,7 +475,7 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
                     "the compose file: the layer '{}': the alias {}", from,
                     alias.error())};
             }
-            for (auto& l : img->layers) {
+            for (auto& l : img->layers()) {
                 if (l.alias == *alias) {
                     src = l.layer;
                 }
@@ -505,7 +505,7 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
             if (!img) {
                 return unexpected{img.error()};
             }
-            src = img->layers.front().layer;
+            src = img->layers().front().layer;
         }
         auto mount = src->mount;
         if (auto m = e.find("mount"); m != e.end()) {
@@ -573,7 +573,7 @@ resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
         if (movable && items.size() == 1u && (item.mount || item.alias)) {
             // a layer started on its own: the mount point is an input to the
             // raise
-            return raise_layer(img->layers.front().layer, item.mount, force,
+            return raise_layer(img->layers().front().layer, item.mount, force,
                                item.alias);
         }
         merge.push_back({.alias = item.alias,

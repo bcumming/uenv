@@ -357,7 +357,7 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         return 1;
     }
     json layers = json::array();
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         json views = json::object();
         for (auto& [k, v] : l.layer.views) {
             views[k.string()] = env_json_of(v.env);
@@ -374,7 +374,7 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
              {"views", views}});
     }
     json views = json::object();
-    for (auto& [k, v] : img->views) {
+    for (auto& [k, v] : img->views()) {
         json inc = json::array();
         for (auto& r : v.include) {
             inc.push_back(format_as(r));
@@ -382,18 +382,18 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         views[format_as(k)] = {{"include", inc}, {"env", env_json_of(v.env)}};
     }
     std::vector<std::string> defaults;
-    for (auto& d : img->default_views) {
+    for (auto& d : img->default_views()) {
         defaults.push_back(format_as(d));
     }
     const std::string kind =
-        img->kind == uenv::image_kind::layer           ? "layer"
-        : img->kind == uenv::image_kind::runtime_merge ? "runtime merge"
+        img->kind() == uenv::image_kind::layer           ? "layer"
+        : img->kind() == uenv::image_kind::runtime_merge ? "runtime merge"
                                                        : "image";
     json j{{"kind", kind},
-           {"label", label_of(img->config)},
-           {"description", img->config.description},
-           {"meta", meta_json(img->config.meta)},
-           {"digest", img->digest ? img->digest->string() : ""},
+           {"label", label_of(img->config())},
+           {"description", img->config().description},
+           {"meta", meta_json(img->config().meta)},
+           {"digest", img->digest() ? img->digest()->string() : ""},
            {"layers", layers},
            {"views", views},
            {"default_views", defaults}};
@@ -401,11 +401,11 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         term::msg("{}", j.dump(2));
         return 0;
     }
-    term::msg("{} {}", kind, label_of(img->config));
+    term::msg("{} {}", kind, label_of(img->config()));
     term::msg("  digest: {}", j["digest"].get<std::string>());
-    term::msg("  meta:   {}", meta_string(img->config));
+    term::msg("  meta:   {}", meta_string(img->config()));
     term::msg("  layers:");
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         term::msg("    {:<12} {:<28} {} {}", l.alias, l.mount,
                   label_of(l.layer.config),
                   l.layer.relocatable ? "(relocatable)" : "");
@@ -629,23 +629,14 @@ int image_copy(const copy_args& args, const global_settings& settings) {
         term::error("{}", dst.error());
         return 1;
     }
-    std::map<std::string, std::string> changes;
+    std::vector<config_change> changes;
     if (args.set) {
-        std::size_t start = 0;
-        auto text = *args.set;
-        while (start < text.size()) {
-            auto end = text.find(',', start);
-            auto kv = text.substr(start, end == std::string::npos
-                                             ? std::string::npos
-                                             : end - start);
-            auto eq = kv.find('=');
-            if (eq == std::string::npos) {
-                term::error("--set: '{}' must have the form key=value", kv);
-                return 1;
-            }
-            changes[kv.substr(0, eq)] = kv.substr(eq + 1);
-            start = end == std::string::npos ? text.size() : end + 1;
+        auto c = parse_config_changes(*args.set);
+        if (!c) {
+            term::error("{}", c.error());
+            return 1;
         }
+        changes = std::move(*c);
     }
     auto ctx = make_context(settings, args.registry);
     auto r = registry::copy(*src, dst->where, ctx, changes);

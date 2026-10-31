@@ -478,7 +478,8 @@ TEST_CASE("4/copy with a change is a new image with the same layers",
     REQUIRE(reg::attach(a, "uenv/signature", "sig", e->ctx));
     REQUIRE(reg::attach(addr(*e, "+prgenv-gnu"), "uenv/sbom", "{}", e->ctx));
 
-    auto r = reg::copy(a, deploy, e->ctx, {{"meta.system", "santis"}});
+    auto r = reg::copy(a, deploy, e->ctx,
+                       {uenv::set_meta{nm("system"), "santis"}});
     REQUIRE(r);
     REQUIRE(r->digest != img.digest);
     auto refs = *reg::list_referrers(deploy, r->repository, r->digest, e->ctx);

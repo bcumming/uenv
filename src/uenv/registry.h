@@ -165,7 +165,7 @@ pull(store& s, const address& a, context& ctx);
 // {"meta.system": "santis"}), the copy is a new image with the same layers.
 util::expected<push_result, std::string>
 copy(const address& src, const target& dst, context& ctx,
-     const std::map<std::string, std::string>& changes = {});
+     const std::vector<config_change>& changes = {});
 
 // delete the top-level object of an image or of a building block
 util::expected<push_result, std::string> remove(const address& a,

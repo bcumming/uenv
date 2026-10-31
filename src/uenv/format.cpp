@@ -1022,12 +1022,12 @@ load_composed_image(const oci::digest& digest, const std::string& body,
 image_config image_config_of(const composed_image& img) {
     // only an image or a raised layer: the views have no item, and there is
     // at most one default view (make_image_objects refuses a runtime merge)
-    image_config c{.shared = img.config};
-    for (auto& [name, v] : img.views) {
+    image_config c{.shared = img.config()};
+    for (auto& [name, v] : img.views()) {
         c.views[name.name] = v;
     }
-    if (!img.default_views.empty()) {
-        c.default_view = img.default_views.front().name;
+    if (!img.default_views().empty()) {
+        c.default_view = img.default_views().front().name;
     }
     return c;
 }
@@ -1048,12 +1048,12 @@ util::expected<void, error> check_storable(const config& c, std::string_view wha
 } // namespace
 
 util::expected<image_objects, error> make_image_objects(const composed_image& img) {
-    if (img.kind == image_kind::runtime_merge) {
+    if (img.kind() == image_kind::runtime_merge) {
         return unexpected{error{"a runtime merge cannot be stored: it has no "
                                 "image config. Write an image config that "
                                 "contains the layers, and compose it."}};
     }
-    if (auto r = check_storable(img.config, "image"); !r) {
+    if (auto r = check_storable(img.config(), "image"); !r) {
         return unexpected{r.error()};
     }
     auto cfg_bytes = canonical(to_json(image_config_of(img)));
@@ -1066,7 +1066,7 @@ util::expected<image_objects, error> make_image_objects(const composed_image& im
         return unexpected{wrapper.error()};
     }
     std::vector<index_entry> entries;
-    for (auto& l : img.layers) {
+    for (auto& l : img.layers()) {
         if (!l.layer.manifest) {
             return unexpected{fmt::format(
                 "the layer '{}' has no identity: it was not added to a "

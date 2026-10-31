@@ -307,7 +307,7 @@ TEST_CASE("1/checks: a valid image", "[model]") {
     auto img = uenv::make_composed_image(std::nullopt, my_env_config(),
                                          my_env_layers(), my_env_views(), nm("dev"));
     REQUIRE(img);
-    REQUIRE(img->layers.front().alias == nm("prgenv-gnu"));
+    REQUIRE(img->layers().front().alias == nm("prgenv-gnu"));
 }
 
 TEST_CASE("1/checks: each check of a composed_image", "[model]") {
@@ -521,14 +521,14 @@ TEST_CASE("1/raise: the raise of a layer", "[model]") {
     auto t = tools();
     auto img = uenv::raise_layer(t, std::nullopt, false);
     REQUIRE(img);
-    REQUIRE(img->digest == t.digest());
-    REQUIRE(img->kind == uenv::image_kind::layer);
-    REQUIRE(img->layers.size() == 1u);
-    REQUIRE(img->layers[0].alias == nm("tools"));
-    REQUIRE(img->views.at(vname("tools")).include ==
+    REQUIRE(img->digest() == t.digest());
+    REQUIRE(img->kind() == uenv::image_kind::layer);
+    REQUIRE(img->layers().size() == 1u);
+    REQUIRE(img->layers()[0].alias == nm("tools"));
+    REQUIRE(img->views().at(vname("tools")).include ==
             refs({"tools:tools"}));
-    REQUIRE(img->default_views == vnames({"tools"}));
-    REQUIRE(img->config == t.config);
+    REQUIRE(img->default_views() == vnames({"tools"}));
+    REQUIRE(img->config() == t.config);
     // two raises give the same result
     auto again = uenv::raise_layer(t, std::nullopt, false);
     REQUIRE(format::image_digest(*again) == format::image_digest(*img));
@@ -538,7 +538,7 @@ TEST_CASE("1/raise: a different mount point is an input to the raise",
           "[model]") {
     auto img = uenv::raise_layer(tools(), mp("/opt/tools"), false);
     REQUIRE(img);
-    REQUIRE(img->layers[0].mount == mp("/opt/tools"));
+    REQUIRE(img->layers()[0].mount == mp("/opt/tools"));
     auto c = uenv::concretise(*img, {});
     envvars::state env;
     uenv::apply_patches(env, c->patches);
@@ -550,7 +550,7 @@ TEST_CASE("1/raise: --force mounts a layer that is not relocatable",
     REQUIRE(!uenv::raise_layer(prgenv(), mp("/opt/pe"), false));
     auto img = uenv::raise_layer(prgenv(), mp("/opt/pe"), true);
     REQUIRE(img);
-    REQUIRE(img->layers[0].mount == mp("/opt/pe"));
+    REQUIRE(img->layers()[0].mount == mp("/opt/pe"));
 }
 
 //
@@ -559,28 +559,58 @@ TEST_CASE("1/raise: --force mounts a layer that is not relocatable",
 
 namespace {
 uenv::composed_image image_of(uenv::layer l, std::map<uenv::name, std::string> meta = {}) {
-    auto img = *uenv::raise_layer(l, std::nullopt, false);
-    img.kind = uenv::image_kind::image;
-    img.config.meta.insert(meta.begin(), meta.end());
-    img.digest = format::image_digest(img);
-    return img;
+    auto img = *uenv::promote(*uenv::raise_layer(l, std::nullopt, false), meta);
+    return img.identified_by(*format::image_digest(img));
 }
 // my-env: prgenv-gnu at /user-environment, tools at /user-environment/tools
 uenv::composed_image my_env() {
     auto img = *uenv::make_composed_image(std::nullopt, my_env_config(),
                                           my_env_layers(), my_env_views(),
                                           nm("dev"));
-    img.digest = format::image_digest(img);
-    return img;
+    return img.identified_by(*format::image_digest(img));
 }
 std::vector<std::string> aliases_of(const uenv::composed_image& img) {
     std::vector<std::string> out;
-    for (auto& l : img.layers) {
+    for (auto& l : img.layers()) {
         out.push_back(l.alias.string());
     }
     return out;
 }
 } // namespace
+
+TEST_CASE("1/promotion: only the raise of a layer is promoted", "[model]") {
+    auto raised = *uenv::raise_layer(tools());
+    auto img = uenv::promote(raised, named<std::string>({{"system", "daint"}}));
+    REQUIRE(img);
+    REQUIRE(img->kind() == uenv::image_kind::image);
+    REQUIRE(!img->digest());
+    REQUIRE(img->config().meta.at(nm("system")) == "daint");
+    // an image is not promoted again
+    REQUIRE(!uenv::promote(*img, {}));
+}
+
+TEST_CASE("4/copy: the changes of --set are parsed, then checked", "[model]") {
+    auto c = uenv::parse_config_changes("release=v2,meta.system=santis,meta.uarch=");
+    REQUIRE(c);
+    REQUIRE(c->size() == 3u);
+    for (auto bad : {"release=", "release", "name=x", "size=3", "meta.a b=x",
+                     "release=v2+x", "release=v2,"}) {
+        INFO(bad);
+        auto e = uenv::parse_config_changes(bad);
+        REQUIRE(!e);
+        REQUIRE(e.error().find(bad) != std::string::npos);
+    }
+    auto img = my_env();
+    auto changed = uenv::with_changes(img, *c);
+    REQUIRE(changed);
+    REQUIRE(changed->config().release == nm("v2"));
+    REQUIRE(changed->config().meta.at(nm("system")) == "santis");
+    REQUIRE(!changed->config().meta.contains(nm("uarch")));
+    // a new image: no digest until it is stored
+    REQUIRE(!changed->digest());
+    // only an image can be copied with changes
+    REQUIRE(!uenv::with_changes(*uenv::raise_layer(tools()), *c));
+}
 
 TEST_CASE("1/runtime merge: two images", "[model]") {
     std::vector<uenv::runtime_merge_item> items{
@@ -588,12 +618,12 @@ TEST_CASE("1/runtime merge: two images", "[model]") {
         {.image = image_of(tools())}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
-    REQUIRE(img->kind == uenv::image_kind::runtime_merge);
-    REQUIRE(img->layers.size() == 2u);
-    REQUIRE(img->config.meta.empty());
-    REQUIRE(img->views.contains(vname("prgenv-gnu:prgenv")));
-    REQUIRE(img->views.contains(vname("tools:tools")));
-    REQUIRE(img->default_views ==
+    REQUIRE(img->kind() == uenv::image_kind::runtime_merge);
+    REQUIRE(img->layers().size() == 2u);
+    REQUIRE(img->config().meta.empty());
+    REQUIRE(img->views().contains(vname("prgenv-gnu:prgenv")));
+    REQUIRE(img->views().contains(vname("tools:tools")));
+    REQUIRE(img->default_views() ==
             vnames({"prgenv-gnu:prgenv", "tools:tools"}));
     auto c = uenv::concretise(*img, {});
     REQUIRE(c);
@@ -609,7 +639,7 @@ TEST_CASE("1/runtime merge: no identity, and it cannot be stored", "[model]") {
         {.image = image_of(tools())}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
-    REQUIRE(!img->digest);
+    REQUIRE(!img->digest());
     auto objs = format::make_image_objects(*img);
     REQUIRE(!objs);
     REQUIRE(objs.error().find("runtime merge cannot be stored") !=
@@ -617,8 +647,8 @@ TEST_CASE("1/runtime merge: no identity, and it cannot be stored", "[model]") {
     REQUIRE(!format::image_digest(*img));
     // a runtime merge has no label: the description lists the items, in the
     // order of the list
-    REQUIRE(img->config.name == nm("runtime-merge"));
-    REQUIRE(img->config.description == "prgenv-gnu,tools");
+    REQUIRE(img->config().name == nm("runtime-merge"));
+    REQUIRE(img->config().description == "prgenv-gnu,tools");
     // the layers are sorted by mount point, whatever the order of the list
     auto reversed = uenv::runtime_merge({items[1], items[0]});
     REQUIRE(reversed);
@@ -637,9 +667,9 @@ TEST_CASE("1/runtime merge: two items with the same name need an alias",
     items[0].alias = nm("gnu");
     r = uenv::runtime_merge(items);
     REQUIRE(r);
-    REQUIRE(r->layers.size() == 1u);
-    REQUIRE(r->views.at(vname("gnu:prgenv")).include ==
-            r->views.at(vname("prgenv-gnu:prgenv")).include);
+    REQUIRE(r->layers().size() == 1u);
+    REQUIRE(r->views().at(vname("gnu:prgenv")).include ==
+            r->views().at(vname("prgenv-gnu:prgenv")).include);
 }
 
 TEST_CASE("1/runtime merge: two layers at one mount point", "[model]") {
@@ -659,7 +689,7 @@ TEST_CASE("1/runtime merge: an alias renames the include of each view",
          .movable = true}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
-    REQUIRE(img->views.at(vname("t:tools")).include == refs({"t:tools"}));
+    REQUIRE(img->views().at(vname("t:tools")).include == refs({"t:tools"}));
     REQUIRE(uenv::concretise(*img, views("t:tools,pe:modules")));
 }
 
@@ -680,9 +710,9 @@ TEST_CASE("1/runtime merge: an image view of an item is not a layer view",
     REQUIRE(img);
     // the image view is named by the alias of the item
     const auto key = uenv::image_view_name{.item = nm("a"), .name = nm("modules")};
-    REQUIRE(img->views.contains(key));
-    REQUIRE(img->views.at(key).include == refs({"a:modules"}));
-    REQUIRE(img->default_views[0] == key);
+    REQUIRE(img->views().contains(key));
+    REQUIRE(img->views().at(key).include == refs({"a:modules"}));
+    REQUIRE(img->default_views()[0] == key);
     // a:modules is the image view: the layer view, then the env patch
     auto c = uenv::concretise(*img, views("a:modules"));
     REQUIRE(c);
@@ -718,12 +748,12 @@ TEST_CASE("1/runtime merge: an image with more than one layer", "[model]") {
                                       "debug"))}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
-    REQUIRE(img->layers.size() == 3u);
+    REQUIRE(img->layers().size() == 3u);
     REQUIRE(aliases_of(*img) ==
             std::vector<std::string>{"prgenv-gnu", "tools", "debugger"});
-    REQUIRE(img->views.at(vname("my-env:dev")).include ==
+    REQUIRE(img->views().at(vname("my-env:dev")).include ==
             refs({"prgenv-gnu:prgenv", "tools:tools"}));
-    REQUIRE(img->default_views == vnames({"my-env:dev", "debugger:debug"}));
+    REQUIRE(img->default_views() == vnames({"my-env:dev", "debugger:debug"}));
     // a view name with no item: the one item that has a view of that name
     auto c = uenv::concretise(*img, views("dev,debug"));
     REQUIRE(c);
@@ -747,9 +777,9 @@ TEST_CASE("1/runtime merge: a clash of layer aliases renames the later layer",
     REQUIRE(aliases_of(*img) ==
             std::vector<std::string>{"tools.tools", "prgenv-gnu", "tools"});
     // the views of each item refer to the layers of that item
-    REQUIRE(img->views.at(vname("tools:tools")).include ==
+    REQUIRE(img->views().at(vname("tools:tools")).include ==
             refs({"tools.tools:tools"}));
-    REQUIRE(img->views.at(vname("my-env:dev")).include ==
+    REQUIRE(img->views().at(vname("my-env:dev")).include ==
             refs({"prgenv-gnu:prgenv", "tools:tools"}));
     envvars::state env;
     uenv::apply_patches(env, uenv::concretise(*img, views("tools:tools"))->patches);
@@ -776,9 +806,9 @@ TEST_CASE("1/runtime merge: one item is the item itself", "[model]") {
     auto big = my_env();
     auto r = uenv::runtime_merge({{.image = big}});
     REQUIRE(r);
-    REQUIRE(r->kind == uenv::image_kind::image);
-    REQUIRE(r->digest == big.digest);
-    REQUIRE(r->views.contains(vname("dev")));
+    REQUIRE(r->kind() == uenv::image_kind::image);
+    REQUIRE(r->digest() == big.digest());
+    REQUIRE(r->views().contains(vname("dev")));
 }
 
 //
@@ -948,8 +978,10 @@ TEST_CASE("1/concretise: the views", "[concretise]") {
         REQUIRE(c.error().find("dev") != std::string::npos);
     }
     SECTION("no default view: no view") {
-        img.default_views.clear();
-        auto c = uenv::concretise(img, {});
+        auto none = *uenv::make_composed_image(std::nullopt, my_env_config(),
+                                               my_env_layers(), my_env_views(),
+                                               std::nullopt);
+        auto c = uenv::concretise(none, {});
         REQUIRE(c);
         REQUIRE(c->patches.empty());
     }
@@ -966,8 +998,11 @@ TEST_CASE("1/concretise: the views", "[concretise]") {
         REQUIRE(uenv::view_string(c->views[0]) == "dev");
     }
     SECTION("a layer with no local file") {
-        img.layers[1].layer.store.file.reset();
-        auto c = uenv::concretise(img, {});
+        auto ls = my_env_layers();
+        ls[1].layer.store.file.reset();
+        auto unpulled = *uenv::make_composed_image(
+            std::nullopt, my_env_config(), ls, my_env_views(), nm("dev"));
+        auto c = uenv::concretise(unpulled, {});
         REQUIRE(!c);
         REQUIRE(c.error().find("pull") != std::string::npos);
     }

@@ -174,14 +174,14 @@ migrate_v1(const fs::path& root, migrate_options opts,
             fail("the meta keys system and uarch are not names");
             continue;
         }
-        auto img = raise_layer(*l, std::nullopt, false);
+        auto raised = raise_layer(*l, std::nullopt, false);
+        auto img = raised ? promote(std::move(*raised), {{*system_key, r.system},
+                                                         {*uarch_key, r.uarch}})
+                          : raised;
         if (!img) {
             fail(img.error());
             continue;
         }
-        img->kind = uenv::image_kind::image;
-        img->config.meta[*system_key] = r.system;
-        img->config.meta[*uarch_key] = r.uarch;
         auto objs = format::make_image_objects(*img);
         if (!objs) {
             report.failed++;

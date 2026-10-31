@@ -239,6 +239,72 @@ parse_layer_view_ref(const std::string& in) {
     return layer_view_ref{.alias = *r->item, .view = r->name};
 }
 
+util::expected<std::vector<config_change>, std::string>
+parse_config_changes(const std::string& in) {
+    auto L = lex::lexer(in);
+    auto fail = [&](const std::string& why) {
+        return util::unexpected{fmt::format("--set '{}': {}", in, why)};
+    };
+    std::vector<config_change> out;
+    while (true) {
+        auto key = parse_name(L);
+        if (!key) {
+            return fail("expected a list of key=value");
+        }
+        if (L.current_kind() != lex::tok::equals) {
+            return fail(fmt::format("expected '=' after '{}'", *key));
+        }
+        L.next();
+        std::optional<name> value;
+        if (is_name_start_tok(L.current_kind())) {
+            auto v = parse_name(L);
+            if (!v) {
+                return fail(v.error().message());
+            }
+            auto n = name::parse(*v);
+            if (!n) {
+                return fail(n.error());
+            }
+            value = *n;
+        }
+        if (*key == "version" || *key == "release") {
+            if (!value) {
+                return fail(fmt::format("{} needs a value", *key));
+            }
+            if (*key == "version") {
+                out.push_back(set_version{*value});
+            } else {
+                out.push_back(set_release{*value});
+            }
+        } else if (key->starts_with("meta.")) {
+            auto k = name::parse(key->substr(5));
+            if (!k) {
+                return fail(fmt::format("the meta key {}", k.error()));
+            }
+            if (value) {
+                out.push_back(set_meta{*k, value->string()});
+            } else {
+                out.push_back(erase_meta{*k});
+            }
+        } else if (*key == "name") {
+            return fail("a copy cannot change the name: the name gives the "
+                        "repository");
+        } else {
+            return fail(fmt::format("a copy cannot change '{}': the keys are "
+                                    "version, release and meta.<key>",
+                                    *key));
+        }
+        if (L.current_kind() == lex::tok::comma) {
+            L.next();
+            continue;
+        }
+        if (L.current_kind() == lex::tok::end) {
+            return out;
+        }
+        return fail(fmt::format("unexpected '{}'", L.peek().spelling));
+    }
+}
+
 util::expected<std::vector<view_request>, std::string>
 parse_view_requests(const std::string& in) {
     auto vs = parse_view_args(in);

@@ -10,6 +10,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <oci/digest.h>
@@ -127,21 +128,119 @@ enum class image_kind {
     runtime_merge,
 };
 
-struct composed_image {
+using model_error = std::string;
+
+// a change to the image config that a copy makes (copy --set)
+struct set_version {
+    uenv::name value;
+};
+struct set_release {
+    uenv::name value;
+};
+struct set_meta {
+    uenv::name key;
+    std::string value;
+};
+struct erase_meta {
+    uenv::name key;
+};
+using config_change = std::variant<set_version, set_release, set_meta, erase_meta>;
+
+class composed_image;
+struct runtime_merge_item;
+
+util::expected<composed_image, model_error>
+make_composed_image(std::optional<oci::digest> digest, config cfg,
+                    std::vector<named_layer> layers,
+                    std::map<uenv::name, image_view> views,
+                    std::optional<uenv::name> default_view);
+util::expected<composed_image, model_error>
+raise_layer(const layer& l, std::optional<mount_point> mount, bool force,
+            std::optional<uenv::name> alias);
+util::expected<composed_image, model_error>
+runtime_merge(std::vector<runtime_merge_item> items);
+util::expected<composed_image, model_error>
+promote(composed_image raised, const std::map<uenv::name, std::string>& meta);
+util::expected<composed_image, model_error>
+with_changes(composed_image img, const std::vector<config_change>& changes);
+
+// The model of an image (1-composition.md, "The composed_image model"). Only
+// the functions above make or change one, and each runs the checks of the
+// model, so each composed_image is valid. The fields are read only.
+class composed_image {
+  public:
     // the digest of the top-level object: an index, or the layer manifest of
-    // a raised layer. Absent for a squashfs file and for a runtime merge.
-    std::optional<oci::digest> digest;
-    image_kind kind = image_kind::image;
-
+    // a raised layer. Absent for a squashfs file, for a runtime merge, and
+    // for an image that is not stored yet.
+    const std::optional<oci::digest>& digest() const {
+        return digest_;
+    }
+    image_kind kind() const {
+        return kind_;
+    }
     // sorted by mount point
-    std::vector<named_layer> layers;
-
-    uenv::config config;
-    std::map<image_view_name, image_view> views;
+    const std::vector<named_layer>& layers() const {
+        return layers_;
+    }
+    const uenv::config& config() const {
+        return config_;
+    }
+    const std::map<image_view_name, image_view>& views() const {
+        return views_;
+    }
     // the views to load if the user names none.
     // A stored image has at most one. A runtime merge has the default view of
     // each item, in the order of the list.
-    std::vector<image_view_name> default_views;
+    const std::vector<image_view_name>& default_views() const {
+        return default_views_;
+    }
+
+    // the same image, identified by the digest of its stored objects: the
+    // caller makes the objects (format::make_image_objects) and gives their
+    // digest
+    composed_image identified_by(oci::digest d) const {
+        auto c = *this;
+        c.digest_ = std::move(d);
+        return c;
+    }
+
+  private:
+    // the checks of the model ("Checks" in 1-composition.md), then the sort
+    static util::expected<composed_image, model_error>
+    checked(std::optional<oci::digest> digest, image_kind kind, uenv::config cfg,
+            std::vector<named_layer> layers,
+            std::map<image_view_name, image_view> views,
+            std::vector<image_view_name> default_views, bool allow_forced_moves);
+
+    composed_image(std::optional<oci::digest> digest, image_kind kind,
+                   std::vector<named_layer> layers, uenv::config cfg,
+                   std::map<image_view_name, image_view> views,
+                   std::vector<image_view_name> default_views)
+        : digest_(std::move(digest)), kind_(kind), layers_(std::move(layers)),
+          config_(std::move(cfg)), views_(std::move(views)),
+          default_views_(std::move(default_views)) {
+    }
+
+    friend util::expected<composed_image, model_error>
+    make_composed_image(std::optional<oci::digest>, uenv::config,
+                        std::vector<named_layer>, std::map<uenv::name, image_view>,
+                        std::optional<uenv::name>);
+    friend util::expected<composed_image, model_error>
+    raise_layer(const layer&, std::optional<mount_point>, bool,
+                std::optional<uenv::name>);
+    friend util::expected<composed_image, model_error>
+        runtime_merge(std::vector<runtime_merge_item>);
+    friend util::expected<composed_image, model_error>
+    promote(composed_image, const std::map<uenv::name, std::string>&);
+    friend util::expected<composed_image, model_error>
+    with_changes(composed_image, const std::vector<config_change>&);
+
+    std::optional<oci::digest> digest_;
+    image_kind kind_ = image_kind::image;
+    std::vector<named_layer> layers_;
+    uenv::config config_;
+    std::map<image_view_name, image_view> views_;
+    std::vector<image_view_name> default_views_;
 };
 
 // the result of concretise: never stored, never an input to compose
@@ -154,21 +253,27 @@ struct concrete_image {
     std::vector<view_request> views;
 };
 
-using model_error = std::string;
-
 // Make a composed_image from its parts: sort the layers by mount point and
 // apply the checks of "Checks" in 1-composition.md.
-util::expected<composed_image, model_error>
-make_composed_image(std::optional<oci::digest> digest, config cfg,
-                    std::vector<named_layer> layers,
-                    std::map<uenv::name, image_view> views,
-                    std::optional<uenv::name> default_view);
+// (declared above composed_image)
 
 // Raise a layer: a composed_image with one layer, and an image view for each
 // layer view. `mount` is the mount point at which to use the layer.
-util::expected<composed_image, model_error>
-raise_layer(const layer& l, std::optional<mount_point> mount, bool force,
-            std::optional<uenv::name> alias = std::nullopt);
+inline util::expected<composed_image, model_error>
+raise_layer(const layer& l, std::optional<mount_point> mount = std::nullopt,
+            bool force = false) {
+    return raise_layer(l, std::move(mount), force, std::nullopt);
+}
+
+// Promote: the raise of a layer, as an image with one layer (1-composition.md,
+// "Promotion"), with `meta` added to the meta of the layer. The result is not
+// stored yet: it has no digest.
+// (declared above composed_image)
+
+// A copy with changes: the image with the changes to its image config, and no
+// digest. The checks run again, and a stored config always has a version and
+// a release.
+// (declared above composed_image)
 
 // one item of the list given to uenv run/start or srun --uenv:
 // [alias=]label[:mount]
@@ -186,8 +291,7 @@ struct runtime_merge_item {
 // (1-composition.md, "Runtime merge"). The result has the kind
 // runtime_merge, no digest, and the image views of each item, named by the
 // alias of the item.
-util::expected<composed_image, model_error>
-runtime_merge(std::vector<runtime_merge_item> items);
+// (declared above composed_image)
 
 // Replace each @uenv-root@ in a patch with the mount point
 envvars::patch replace_root(const envvars::patch& p, const mount_point& mount);

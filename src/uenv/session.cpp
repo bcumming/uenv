@@ -107,13 +107,13 @@ prepare_session(const std::string& uenv_arg,
     }
     const auto& views = c->views;
     // a start checks that each squashfs is in the store before a mount
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         std::error_code ec;
         if (l.layer.store.file && !fs::exists(*l.layer.store.file, ec)) {
             return unexpected{fmt::format(
                 "the squashfs of the layer '{}' of {} is missing ({}). Run "
                 "`uenv repo update`, then pull the image again.",
-                l.alias, img->config.name,
+                l.alias, img->config().name,
                 l.layer.store.digest ? l.layer.store.digest->string()
                                      : l.layer.store.file->string())};
         }
@@ -126,11 +126,11 @@ prepare_session(const std::string& uenv_arg,
 
     // telemetry: one entry for each layer
     nlohmann::json tel = nlohmann::json::array();
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         std::vector<std::string> lviews;
         for (auto& v : views) {
-            auto it = img->views.find(image_view_name{.item = v.item, .name = v.name});
-            if (it != img->views.end()) {
+            auto it = img->views().find(image_view_name{.item = v.item, .name = v.name});
+            if (it != img->views().end()) {
                 for (auto& inc : it->second.include) {
                     if (inc.alias == l.alias) {
                         lviews.push_back(inc.view.string());

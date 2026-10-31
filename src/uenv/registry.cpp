@@ -902,8 +902,8 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     if (!top) {
         return unexpected{top.error()};
     }
-    const bool is_layer = img->kind == uenv::image_kind::layer;
-    const auto& cfg = is_layer ? img->layers.front().layer.config : img->config;
+    const bool is_layer = img->kind() == uenv::image_kind::layer;
+    const auto& cfg = is_layer ? img->layers().front().layer.config : img->config();
     const auto repository = t.repo(cfg.name.string());
     const auto tag = format::make_tag(cfg, object);
     auto dst = open_repo(t, repository, ctx);
@@ -921,7 +921,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     }
 
     // 1. the blobs
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         auto lm = format::parse_layer_manifest(*s.read_blob(*l.layer.digest()));
         auto candidates = layer_candidates(t, l.layer, ctx);
         if (auto r = ensure_blob(*dst, *l.layer.store.digest, l.layer.store.size,
@@ -961,7 +961,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     // 2. the manifests
     if (!is_layer) {
         std::set<std::string> done;
-        for (auto& l : img->layers) {
+        for (auto& l : img->layers()) {
             if (!done.insert(l.layer.digest()->string()).second) {
                 continue;
             }
@@ -994,7 +994,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     // blocks, and their referrers travel)
     if (!is_layer) {
         std::set<std::string> done;
-        for (auto& l : img->layers) {
+        for (auto& l : img->layers()) {
             if (!done.insert(l.layer.digest()->string()).second) {
                 continue;
             }
@@ -1064,7 +1064,7 @@ push_layout(const fs::path& dir, const target& t, context& ctx) {
         return unexpected{fmt::format("the image in {} is not valid: {}",
                                       dir.string(), img.error())};
     }
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         // a squashfs is large: check it as it is linked
         auto h = util::sha256_file(s->blob_path(*l.layer.store.digest));
         if (!h || oci::digest::sha256(*h) != *l.layer.store.digest) {
@@ -1076,7 +1076,7 @@ push_layout(const fs::path& dir, const target& t, context& ctx) {
     if (!s->has_blob(format::empty_config_digest())) {
         (void)s->put_bytes(format::make_blob(std::string(oci::empty_config_body)));
     }
-    if (auto r = s->record(*d, img->kind == uenv::image_kind::layer); !r) {
+    if (auto r = s->record(*d, img->kind() == uenv::image_kind::layer); !r) {
         return unexpected{r.error()};
     }
     return push(*s, *d, t, ctx);
@@ -1146,7 +1146,7 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
     if (a.label) {
         auto q = parse_label_query(*a.label, ctx.keys, ctx.default_system);
         if (q && !q->id) {
-            const auto& c = img->config;
+            const auto& c = img->config();
             auto text = [](const std::optional<name>& n) {
                 return n ? n->string() : std::string{};
             };
@@ -1177,7 +1177,7 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
     }
     test_fault("pull-after-configs");
     // 3. each squashfs that is not in the store
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         auto& d = *l.layer.store.digest;
         if (s.has_blob(d)) {
             s.touch(d);
@@ -1194,7 +1194,7 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
         ctx.st.downloaded++;
         ctx.st.downloaded_bytes += l.layer.store.size;
     }
-    if (img->kind != uenv::image_kind::layer) {
+    if (img->kind() != uenv::image_kind::layer) {
         if (auto r = s.put_bytes(
                 format::make_blob(std::string(oci::empty_config_body)));
             !r) {
@@ -1203,7 +1203,7 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
     }
     test_fault("pull-before-db");
     // 4. the database
-    return s.record(loc->digest, img->kind == uenv::image_kind::layer);
+    return s.record(loc->digest, img->kind() == uenv::image_kind::layer);
 }
 
 //
@@ -1212,7 +1212,7 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
 
 util::expected<push_result, std::string>
 copy(const address& srca, const target& dstt, context& ctx,
-     const std::map<std::string, std::string>& changes) {
+     const std::vector<config_change>& changes) {
     auto loc = locate(srca, ctx);
     if (!loc) {
         return unexpected{loc.error()};
@@ -1264,7 +1264,7 @@ copy(const address& srca, const target& dstt, context& ctx,
 
     // the blobs of the layers
     std::set<std::string> done;
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         if (!done.insert(l.layer.digest()->string()).second) {
             continue;
         }
@@ -1294,7 +1294,7 @@ copy(const address& srca, const target& dstt, context& ctx,
         return unexpected{rec.error()};
     }
     if (*kind == format::object_kind::layer) {
-        tag = loc->tag.value_or(format::make_tag(img->config, loc->digest));
+        tag = loc->tag.value_or(format::make_tag(img->config(), loc->digest));
         if (auto x = check_tag(*dst, tag, loc->digest); !x) {
             return unexpected{x.error()};
         }
@@ -1321,7 +1321,7 @@ copy(const address& srca, const target& dstt, context& ctx,
             !r) {
             return unexpected{r.error()};
         }
-        tag = loc->tag.value_or(format::make_tag(img->config, loc->digest));
+        tag = loc->tag.value_or(format::make_tag(img->config(), loc->digest));
         if (auto x = check_tag(*dst, tag, loc->digest); !x) {
             return unexpected{x.error()};
         }
@@ -1332,35 +1332,11 @@ copy(const address& srca, const target& dstt, context& ctx,
         }
     } else {
         // a copy with a change is a compose with one change
-        auto changed = *img;
-        for (auto& [k, v] : changes) {
-            if (k == "release" || k == "version") {
-                auto n = name::parse(v);
-                if (!n) {
-                    return unexpected{fmt::format("--set {}: {}", k, n.error())};
-                }
-                (k == "release" ? changed.config.release : changed.config.version) =
-                    *n;
-            } else if (k == "name") {
-                return unexpected{std::string{
-                    "a copy cannot change the name: the name gives the "
-                    "repository"}};
-            } else if (k.starts_with("meta.")) {
-                auto key = name::parse(k.substr(5));
-                if (!key) {
-                    return unexpected{
-                        fmt::format("--set {}: the meta key {}", k, key.error())};
-                }
-                if (v.empty()) {
-                    changed.config.meta.erase(*key);
-                } else {
-                    changed.config.meta[*key] = v;
-                }
-            } else {
-                return unexpected{fmt::format("a copy cannot change '{}'", k)};
-            }
+        auto changed = with_changes(*img, changes);
+        if (!changed) {
+            return unexpected{changed.error()};
         }
-        auto objs = format::make_image_objects(changed);
+        auto objs = format::make_image_objects(*changed);
         if (!objs) {
             return unexpected{objs.error()};
         }
@@ -1379,8 +1355,8 @@ copy(const address& srca, const target& dstt, context& ctx,
             return unexpected{r.error()};
         }
         result = objs->index.digest;
-        changed.digest = result;
-        tag = format::make_tag(changed.config, result);
+        const auto stored = changed->identified_by(result);
+        tag = format::make_tag(stored.config(), result);
         if (auto x = check_tag(*dst, tag, result); !x) {
             return unexpected{x.error()};
         }
@@ -1389,7 +1365,7 @@ copy(const address& srca, const target& dstt, context& ctx,
             !r) {
             return unexpected{r.error()};
         }
-        rec = record_of(changed, 0);
+        rec = record_of(stored, 0);
         if (!rec) {
             return unexpected{rec.error()};
         }
@@ -1405,7 +1381,7 @@ copy(const address& srca, const target& dstt, context& ctx,
     }
     if (*kind == format::object_kind::image) {
         std::set<std::string> rdone;
-        for (auto& l : img->layers) {
+        for (auto& l : img->layers()) {
             if (!rdone.insert(l.layer.digest()->string()).second) {
                 continue;
             }

@@ -916,16 +916,16 @@ store::load(const oci::digest& d) const {
 util::expected<object_record, std::string>
 record_of(const composed_image& img, std::uint64_t size) {
     // only an object that a store holds has a record: each digest is set
-    if (!img.digest) {
+    if (!img.digest()) {
         return unexpected{fmt::format("the {} has no digest: it is not stored",
-                                      img.config.name)};
+                                      img.config().name)};
     }
     std::vector<layer_ref> refs;
-    for (auto& l : img.layers) {
+    for (auto& l : img.layers()) {
         if (!l.layer.digest() || !l.layer.store.digest) {
             return unexpected{fmt::format(
                 "the layer '{}' of {} has no digest: it is not stored", l.alias,
-                img.config.name)};
+                img.config().name)};
         }
         refs.push_back(layer_ref{.alias = l.alias,
                                  .mount = l.mount,
@@ -936,13 +936,13 @@ record_of(const composed_image& img, std::uint64_t size) {
                                  .squashfs = *l.layer.store.digest,
                                  .squashfs_size = l.layer.store.size});
     }
-    const bool is_layer = img.kind == uenv::image_kind::layer;
-    const auto& front = img.layers.front().layer;
+    const bool is_layer = img.kind() == uenv::image_kind::layer;
+    const auto& front = img.layers().front().layer;
     return object_record{
         .kind = is_layer ? format::object_kind::layer : format::object_kind::image,
-        .digest = *img.digest,
-        .id = format::short_id(*img.digest),
-        .cfg = img.config,
+        .digest = *img.digest(),
+        .id = format::short_id(*img.digest()),
+        .cfg = img.config(),
         .added = now_utc(),
         .size = size,
         .layers = std::move(refs),
@@ -963,7 +963,7 @@ store::record(const oci::digest& top, bool standalone_layer) {
     }
     // the blobs that the object reaches
     std::vector<oci::digest> blobs{top};
-    if (img->kind != uenv::image_kind::layer) {
+    if (img->kind() != uenv::image_kind::layer) {
         auto body = read_blob(top);
         auto idx = body ? format::parse_index(*body)
                         : util::expected<format::image_index, format::error>{
@@ -982,7 +982,7 @@ store::record(const oci::digest& top, bool standalone_layer) {
         blobs.push_back(w->config.digest);
         blobs.push_back(format::empty_config_digest());
     }
-    for (auto& l : img->layers) {
+    for (auto& l : img->layers()) {
         // a loaded layer has a digest
         auto d = l.layer.digest();
         if (!d) {
@@ -1020,7 +1020,7 @@ store::record(const oci::digest& top, bool standalone_layer) {
     if (!r) {
         return unexpected{r.error()};
     }
-    r->standalone = standalone_layer && img->kind == uenv::image_kind::layer;
+    r->standalone = standalone_layer && img->kind() == uenv::image_kind::layer;
     test_fault("record-before-db");
     if (auto x = db_.add(*r, unique); !x) {
         return unexpected{x.error()};

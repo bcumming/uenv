@@ -8,6 +8,7 @@
 #include <util/expected.h>
 
 #include <uenv/elastic.h>
+#include <uenv/model.h>
 #include <uenv/mount.h>
 #include <uenv/settings.h>
 #include <uenv/uenv.h>
@@ -40,6 +41,11 @@ parse_file_path(std::string_view in);
 // "alias:view": the stored form of a reference to a layer view
 util::expected<layer_view_ref, std::string>
 parse_layer_view_ref(const std::string& in);
+
+// "key=value,...": the changes of copy --set. A key is version, release or
+// meta.<key>. A value is a name; an empty value erases a meta key.
+util::expected<std::vector<config_change>, std::string>
+parse_config_changes(const std::string& in);
 
 // "[item:]view,...": the views that a user names (--view, UENV_VIEW)
 util::expected<std::vector<view_request>, std::string>
