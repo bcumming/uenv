@@ -1,6 +1,8 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <util/expected.h>
@@ -26,6 +28,14 @@ parse_view_args(const std::string& arg);
 
 util::expected<std::vector<env_view_description>, parse_error>
 parse_env_view_description(const std::string& arg);
+
+// a name of a v1 label: [A-Za-z0-9_][A-Za-z0-9_.-]*, the whole input
+util::expected<std::string, parse_error> parse_name(const std::string& in);
+
+// a path that a user gives for a file or a directory (parse_path), made
+// absolute against the current directory
+util::expected<std::filesystem::path, std::string>
+parse_file_path(std::string_view in);
 
 // "alias:view": the stored form of a reference to a layer view
 util::expected<layer_view_ref, parse_error>

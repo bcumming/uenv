@@ -11,6 +11,7 @@
 
 #include <uenv/format.h>
 #include <uenv/model.h>
+#include <uenv/name.h>
 #include <uenv/parse.h>
 #include <util/envvars.h>
 #include <util/sha.h>

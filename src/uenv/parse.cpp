@@ -157,6 +157,36 @@ parse_view_description(lex::lexer& L) {
     return view_description{{}, name1};
 }
 
+util::expected<std::string, parse_error> parse_name(const std::string& in) {
+    auto L = lex::lexer(in);
+    auto result = parse_name(L);
+    if (!result) {
+        return result;
+    }
+    if (const auto t = L.peek(); t != lex::tok::end) {
+        return util::unexpected(parse_error{
+            L.string(), fmt::format("unexpected symbol '{}'", t.spelling), t});
+    }
+    return result;
+}
+
+util::expected<std::filesystem::path, std::string>
+parse_file_path(std::string_view in) {
+    const std::string s(in);
+    auto p = parse_path(s);
+    if (!p) {
+        return util::unexpected{fmt::format("'{}' is not a valid path: {}", s,
+                                            p.error().message())};
+    }
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(*p, ec);
+    if (ec) {
+        return util::unexpected{
+            fmt::format("'{}' is not a valid path: {}", s, ec.message())};
+    }
+    return abs.lexically_normal();
+}
+
 util::expected<view_description, parse_error>
 parse_view_description(const std::string& in) {
     auto L = lex::lexer(in);

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <string>
 #include <vector>
@@ -61,12 +62,12 @@ std::optional<parsed_media_type> parse_uenv_media_type(std::string_view mt) {
         return std::nullopt;
     }
     auto num = mt.substr(dot + 2);
-    if (!std::all_of(num.begin(), num.end(),
-                     [](unsigned char c) { return std::isdigit(c); })) {
+    unsigned version = 0;
+    auto [end, ec] = std::from_chars(num.data(), num.data() + num.size(), version);
+    if (ec != std::errc{} || end != num.data() + num.size()) {
         return std::nullopt;
     }
-    return parsed_media_type{std::string(mt.substr(0, dot)),
-                             unsigned(std::stoul(std::string(num)))};
+    return parsed_media_type{std::string(mt.substr(0, dot)), version};
 }
 
 } // namespace

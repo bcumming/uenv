@@ -300,6 +300,48 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     }
 }
 
+TEST_CASE("2/configs: a name has the grammar of a v1 label", "[config]") {
+    using uenv::name;
+    for (auto ok : {"prgenv-gnu", "24.11", "v1", "a_b.c-1", "2", "netcdf-c", "_a"}) {
+        INFO(ok);
+        REQUIRE(name::parse(ok));
+        REQUIRE(name::parse(ok)->string() == ok);
+    }
+    for (auto bad : {"", "-a", ".a", "a b", "a:b", "a/b", "a+b", "a@b", "a,b",
+                     "a=b", "a%b"}) {
+        INFO(bad);
+        auto n = name::parse(bad);
+        REQUIRE(!n);
+        REQUIRE(n.error().find(std::string("'") + bad + "'") != std::string::npos);
+    }
+    REQUIRE(*name::parse("a") < *name::parse("b"));
+}
+
+TEST_CASE("2/paths: a path that a user gives is parsed, and made absolute",
+          "[config]") {
+    auto p = uenv::parse_file_path("/opt/images/store.squashfs");
+    REQUIRE(p);
+    REQUIRE(*p == "/opt/images/store.squashfs");
+    auto r = uenv::parse_file_path("./images/../store.squashfs");
+    REQUIRE(r);
+    REQUIRE(r->is_absolute());
+    REQUIRE(*r == std::filesystem::current_path() / "store.squashfs");
+    for (auto bad : {"", "store squashfs", "images/a", "/a:b", "~/x"}) {
+        INFO(bad);
+        auto e = uenv::parse_file_path(bad);
+        REQUIRE(!e);
+        REQUIRE(e.error().find(std::string("'") + bad + "'") != std::string::npos);
+    }
+}
+
+TEST_CASE("2/versions: a media type with a very long version does not throw",
+          "[config]") {
+    auto r = format::check_media_type(
+        "application/vnd.uenv.layer-config.v99999999999999999999+json",
+        format::mt_layer_config);
+    REQUIRE(!r);
+}
+
 TEST_CASE("1/mount points: the form that UENV_MOUNT_LIST can hold", "[model]") {
     using uenv::mount_point;
     for (auto ok : {"/", "/user-environment", "/user-environment/tools",
