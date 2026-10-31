@@ -40,6 +40,8 @@ using json = nlohmann::json;
 using namespace v2test;
 namespace format = uenv::format;
 namespace reg = uenv::registry;
+using S = uenv::referrer_subject;
+using O = uenv::referrer_op;
 
 namespace {
 
@@ -163,8 +165,8 @@ std::unique_ptr<env_t> make_env(const std::string& base,
     auto e = std::make_unique<env_t>();
     e->ns = fmt::format("t{}x{}", getpid(), counter++);
     auto url = *util::parse_url(base + "/uenvtest");
-    e->cfg.registries = {{"deploy", url, e->ns + "/deploy"},
-                         {"build", url, e->ns + "/build"}};
+    e->cfg.registries = {{nm("deploy"), url, {nm(e->ns), nm("deploy")}},
+                         {nm("build"), url, {nm(e->ns), nm("build")}}};
     e->cfg.default_registry = "deploy";
     e->cfg.referrer_rules = std::move(rules);
     e->ctx.cfg = &e->cfg;
@@ -218,11 +220,13 @@ std::size_t last_index_of(const std::vector<std::string>& v,
 TEST_CASE("4/addresses: the three forms", "[registry-addr]") {
     uenv::configuration cfg;
     cfg.registries = {
-        {"deploy", *util::parse_url("https://jfrog.svc.cscs.ch/uenv"), "deploy"},
-        {"build", *util::parse_url("https://jfrog.svc.cscs.ch/uenv"), "build"},
-        {"cscs", *util::parse_url("https://jfrog.svc.cscs.ch/uenv"), {}},
-        {"community", *util::parse_url("https://ghcr.io/biology"),
-         "production/deploy"}};
+        {nm("deploy"), *util::parse_url("https://jfrog.svc.cscs.ch/uenv"),
+         {nm("deploy")}},
+        {nm("build"), *util::parse_url("https://jfrog.svc.cscs.ch/uenv"),
+         {nm("build")}},
+        {nm("cscs"), *util::parse_url("https://jfrog.svc.cscs.ch/uenv"), {}},
+        {nm("community"), *util::parse_url("https://ghcr.io/biology"),
+         {nm("production"), nm("deploy")}}};
     cfg.default_registry = "deploy";
     auto repo = [&](std::string text, std::optional<std::string> r = {}) {
         auto a = reg::parse_address(text, cfg, r);
@@ -254,8 +258,8 @@ TEST_CASE("4/addresses: each part is parsed, and each registry has its own "
           "[registry-addr]") {
     uenv::configuration cfg;
     cfg.registries = {
-        {.name = "deploy", .url = *util::parse_url("https://jfrog.svc.cscs.ch/uenv")},
-        {.name = "community", .url = *util::parse_url("https://ghcr.io")}};
+        {.name = nm("deploy"), .url = *util::parse_url("https://jfrog.svc.cscs.ch/uenv")},
+        {.name = nm("community"), .url = *util::parse_url("https://ghcr.io")}};
     cfg.default_registry = "deploy";
     // a full reference by digest
     auto d = reg::parse_address(
@@ -462,11 +466,11 @@ TEST_CASE("4/pull checks the image before the squashfs download", "[registry]") 
 TEST_CASE("4/copy with no change, and its referrers", "[registry]") {
     REQUIRE_ZOT();
     std::vector<uenv::referrer_rule> rules{
-        {"uenv/sbom", "application/spdx+json", {"layer"}, {"copy", "compose"}, true},
+        {"uenv/sbom", "application/spdx+json", {S::layer}, {O::copy, O::compose}, true},
         {"uenv/signature", "application/vnd.dev.sigstore.bundle.v0.3+json",
-         {"image", "layer"}, {"copy"}, false},
+         {S::image, S::layer}, {O::copy}, false},
         {"uenv/status", "application/vnd.uenv.status.v1+json",
-         {"image", "layer"}, {}, true}};
+         {S::image, S::layer}, {}, true}};
     auto e = make_env(shared_zot().base, rules);
     auto s = new_store();
     auto build = *reg::resolve_target(e->cfg, "build");
@@ -511,9 +515,9 @@ TEST_CASE("4/copy with a change is a new image with the same layers",
           "[registry]") {
     REQUIRE_ZOT();
     std::vector<uenv::referrer_rule> rules{
-        {"uenv/sbom", "application/spdx+json", {"layer"}, {"copy", "compose"}, true},
+        {"uenv/sbom", "application/spdx+json", {S::layer}, {O::copy, O::compose}, true},
         {"uenv/signature", "application/vnd.dev.sigstore.bundle.v0.3+json",
-         {"image", "layer"}, {"copy"}, false}};
+         {S::image, S::layer}, {O::copy}, false}};
     auto e = make_env(shared_zot().base, rules);
     auto s = new_store();
     auto deploy = *reg::resolve_target(e->cfg, "deploy");
@@ -570,7 +574,7 @@ TEST_CASE("4/attach with fan-out reaches each copy of a layer", "[registry]") {
     REQUIRE_ZOT();
     std::vector<uenv::referrer_rule> rules{
         {"uenv/status", "application/vnd.uenv.status.v1+json",
-         {"image", "layer"}, {}, true}};
+         {S::image, S::layer}, {}, true}};
     auto e = make_env(shared_zot().base, rules);
     auto s = new_store();
     auto t = *reg::resolve_target(e->cfg, {});

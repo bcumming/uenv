@@ -192,7 +192,9 @@ void set_log_level(const envvars::state& env) {
             log_level_str->c_str(),
             log_level_str->c_str() + log_level_str->size(), lvl);
 
-        if (ec == std::errc()) {
+        // the whole value is the number: "2abc" is invalid
+        if (ec == std::errc() &&
+            ptr == log_level_str->c_str() + log_level_str->size() && lvl >= 0) {
             if (lvl == 1) {
                 log_level = spdlog::level::info;
             } else if (lvl == 2) {

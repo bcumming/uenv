@@ -437,6 +437,47 @@ TEST_CASE("read config files v2 malformed", "[settings]") {
     }
 }
 
+TEST_CASE("read config toml: registries, referrers and label keys are parsed",
+          "[settings]") {
+    auto parse = [](std::string text) {
+        return uenv::impl::v2::parse_config_toml(toml::parse(text), {});
+    };
+    auto ok = parse(R"(
+[[registries]]
+name = "deploy"
+url = "jfrog.svc.cscs.ch/uenv"
+namespace = "deploy/prod"
+[[referrers]]
+name = "uenv/sbom"
+artifact_type = "application/spdx+json"
+subjects = ["layer"]
+travel = ["copy", "compose"]
+[label]
+at = "system"
+percent = "uarch"
+)");
+    REQUIRE(ok);
+    REQUIRE(ok->registries.size() == 1u);
+    REQUIRE(ok->registries[0].namespace_.size() == 2u);
+    REQUIRE(ok->referrer_rules.size() == 1u);
+    REQUIRE(ok->referrer_rules[0].travel.size() == 2u);
+    for (auto bad : {
+             "[[registries]]\nname = \"de ploy\"\nurl = \"x.io\"",
+             "[[registries]]\nname = \"a\"\nurl = \"x.io\"\n"
+             "[[registries]]\nname = \"a\"\nurl = \"y.io\"",
+             "[[registries]]\nname = \"a\"\nurl = \"x.io\"\nnamespace = \"a//b\"",
+             "[[referrers]]\nname = \"uenv/sbom\"\nartifact_type = \"spdx\"",
+             "[[referrers]]\nname = \"uenv/sbom\"\nartifact_type = \"a/b\"\n"
+             "travel = [\"push\"]",
+             "[[referrers]]\nname = \"uenv sbom\"\nartifact_type = \"a/b\"",
+             "[label]\nat = \"system\"\npercent = \"system\"",
+             "[label]\nat = \"sys tem\"",
+         }) {
+        INFO(bad);
+        REQUIRE(!parse(bad));
+    }
+}
+
 TEST_CASE("user_cache_path", "[settings]") {
     envvars::state env;
     REQUIRE(!uenv::user_cache_path(env));

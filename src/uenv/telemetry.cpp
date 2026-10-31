@@ -150,6 +150,10 @@ telemetry_from_env(const envvars::state& calling_environment) {
     }
 
     if (const auto mounts_var = calling_environment.get("UENV_MOUNT_LIST")) {
+        // UENV_VIEW of a v1 session has the form mount:uenv:view, which names
+        // the mount of each view. The form of the composed model, [item:]view,
+        // does not: then the mounts have no views (1-composition.md,
+        // "Concretisation"), and this parse fails on purpose.
         const auto views = parse_env_view_description(
             calling_environment.get("UENV_VIEW").value_or(""));
         if (const auto mounts = uenv::parse_mount_list(*mounts_var)) {

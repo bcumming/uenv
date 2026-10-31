@@ -532,13 +532,14 @@ parse_repository_array(const toml::node& input,
                     if (auto v = value.value<std::string>()) {
                         std::string expanded = calling_env.expand(
                             v.value(), envvars::expand_delim::curly);
-                        if (auto parsed = parse_path(expanded)) {
-                            path = std::move(expanded);
+                        // an absolute path: a relative one is made absolute
+                        // against the current directory, once
+                        if (auto parsed = parse_file_path(expanded)) {
+                            path = std::move(*parsed);
                         } else {
                             return make_config_error(
-                                fmt::format("repository.path is not a valid "
-                                            "path: {}",
-                                            parsed.error().message()),
+                                fmt::format("repository.path: {}",
+                                            parsed.error()),
                                 value.source().begin.line);
                         }
                     } else {
@@ -752,6 +753,20 @@ parse_string_array(const toml::node& value, std::string_view what) {
     return out;
 }
 
+// a media type: type/subtype, with the characters of RFC 6838
+bool is_media_type(std::string_view s) {
+    auto part = [](std::string_view p) {
+        return !p.empty() && std::isalnum(static_cast<unsigned char>(p[0])) &&
+               std::all_of(p.begin(), p.end(), [](unsigned char c) {
+                   return std::isalnum(c) || std::string_view("!#$&^_.+-").find(c) !=
+                                                 std::string_view::npos;
+               });
+    };
+    const auto slash = s.find('/');
+    return slash != std::string_view::npos && part(s.substr(0, slash)) &&
+           part(s.substr(slash + 1));
+}
+
 util::expected<std::vector<named_registry>, config_error>
 parse_registries(const toml::node& input) {
     std::vector<named_registry> out;
@@ -792,6 +807,32 @@ parse_registries(const toml::node& input) {
             return make_config_error("a registry needs a name and a url",
                                      node.source().begin.line);
         }
+        auto n = uenv::name::parse(*name);
+        if (!n) {
+            return make_config_error(
+                fmt::format("registries.name: {}", n.error()),
+                node.source().begin.line);
+        }
+        for (auto& r : out) {
+            if (r.name == *n) {
+                return make_config_error(
+                    fmt::format("the registry '{}' is given two times", *n),
+                    node.source().begin.line);
+            }
+        }
+        std::vector<uenv::name> ns;
+        if (nspace) {
+            for (auto& part : util::split(*nspace, '/')) {
+                auto p = uenv::name::parse(part);
+                if (!p) {
+                    return make_config_error(
+                        fmt::format("registries.namespace '{}': {}", *nspace,
+                                    p.error()),
+                        node.source().begin.line);
+                }
+                ns.push_back(*p);
+            }
+        }
         auto u = *url;
         if (u.find("://") == std::string::npos) {
             u = "https://" + u;
@@ -801,7 +842,7 @@ parse_registries(const toml::node& input) {
         if (!parsed) {
             return util::unexpected{parsed.error()};
         }
-        out.push_back({*name, *parsed, nspace});
+        out.push_back({*n, *parsed, std::move(ns)});
     }
     return out;
 }
@@ -820,7 +861,11 @@ parse_referrer_rules(const toml::node& input) {
             return make_config_error("a referrer rule must be a table",
                                      node.source().begin.line);
         }
-        referrer_rule r;
+        std::optional<std::string> rule_name;
+        std::string artifact_type;
+        std::set<referrer_subject> subjects;
+        std::set<referrer_op> travel;
+        bool fan_out = false;
         for (auto& [k, v] : *tbl) {
             auto key = k.str();
             if (key == "name" || key == "artifact_type") {
@@ -830,31 +875,70 @@ parse_referrer_rules(const toml::node& input) {
                         fmt::format("referrers.{} must be a string", key),
                         v.source().begin.line);
                 }
-                (key == "name" ? r.name : r.artifact_type) = *sv;
+                if (key == "name") {
+                    // names separated by '/', for example uenv/sbom
+                    for (auto& part : util::split(*sv, '/')) {
+                        if (auto n = uenv::name::parse(part); !n) {
+                            return make_config_error(
+                                fmt::format("referrers.name '{}': {}", *sv,
+                                            n.error()),
+                                v.source().begin.line);
+                        }
+                    }
+                    rule_name = *sv;
+                } else if (!is_media_type(*sv)) {
+                    return make_config_error(
+                        fmt::format("referrers.artifact_type '{}' is not a "
+                                    "media type of the form type/subtype",
+                                    *sv),
+                        v.source().begin.line);
+                } else {
+                    artifact_type = *sv;
+                }
             } else if (key == "subjects" || key == "travel") {
                 auto list = parse_string_array(v, key);
                 if (!list) {
                     return util::unexpected{list.error()};
                 }
-                (key == "subjects" ? r.subjects : r.travel) = *list;
+                for (auto& item : *list) {
+                    if (key == "subjects" && (item == "image" || item == "layer")) {
+                        subjects.insert(item == "image" ? referrer_subject::image
+                                                        : referrer_subject::layer);
+                    } else if (key == "travel" &&
+                               (item == "copy" || item == "compose")) {
+                        travel.insert(item == "copy" ? referrer_op::copy
+                                                     : referrer_op::compose);
+                    } else {
+                        return make_config_error(
+                            fmt::format("referrers.{}: '{}' is not one of {}",
+                                        key, item,
+                                        key == "subjects" ? "image, layer"
+                                                          : "copy, compose"),
+                            v.source().begin.line);
+                    }
+                }
             } else if (key == "fan_out") {
                 auto b = v.value<bool>();
                 if (!b) {
                     return make_config_error("referrers.fan_out must be a bool",
                                              v.source().begin.line);
                 }
-                r.fan_out = *b;
+                fan_out = *b;
             } else {
                 return make_config_error(fmt::format("unexpected key '{}'", key),
                                          v.source().begin.line);
             }
         }
-        if (r.name.empty() || r.artifact_type.empty()) {
+        if (!rule_name || artifact_type.empty()) {
             return make_config_error(
                 "a referrer rule needs a name and an artifact_type",
                 node.source().begin.line);
         }
-        out.push_back(std::move(r));
+        out.push_back(referrer_rule{.name = *rule_name,
+                                    .artifact_type = std::move(artifact_type),
+                                    .subjects = std::move(subjects),
+                                    .travel = std::move(travel),
+                                    .fan_out = fan_out});
     }
     return out;
 }

@@ -72,14 +72,16 @@ util::expected<target, std::string> named(const configuration& cfg,
                                           const std::string& name,
                                           std::optional<std::string> ns) {
     for (auto& r : cfg.registries) {
-        if (r.name == name) {
-            return target_from_url(name, r.url.string(),
-                                   ns ? ns : r.namespace_);
+        if (r.name.string() == name) {
+            if (!ns && !r.namespace_.empty()) {
+                ns = fmt::format("{}", fmt::join(r.namespace_, "/"));
+            }
+            return target_from_url(name, r.url.string(), ns);
         }
     }
     std::vector<std::string> names;
     for (auto& r : cfg.registries) {
-        names.push_back(r.name);
+        names.push_back(r.name.string());
     }
     return unexpected{fmt::format(
         "there is no registry '{}'. The registries are: {}", name,
@@ -94,8 +96,8 @@ resolve_target(const configuration& cfg,
                std::optional<std::string> registry_option) {
     if (registry_option) {
         for (auto& r : cfg.registries) {
-            if (r.name == *registry_option) {
-                return named(cfg, r.name, std::nullopt);
+            if (r.name.string() == *registry_option) {
+                return named(cfg, r.name.string(), std::nullopt);
             }
         }
         // a URL: a registry with no namespace
@@ -787,12 +789,11 @@ util::expected<void, std::string> put_manifest(repo_handle& dst,
 
 // does a rule let a referrer travel with an operation
 bool travels(const context& ctx, const std::optional<std::string>& artifact_type,
-             std::string_view op) {
+             referrer_op op) {
     if (ctx.cfg && artifact_type) {
         for (auto& r : ctx.cfg->referrer_rules) {
             if (r.artifact_type == *artifact_type) {
-                return std::find(r.travel.begin(), r.travel.end(), op) !=
-                       r.travel.end();
+                return r.travel.contains(op);
             }
         }
     }
@@ -804,7 +805,7 @@ bool travels(const context& ctx, const std::optional<std::string>& artifact_type
 // copy the referrers of a subject from one repository to another
 util::expected<unsigned, std::string>
 copy_referrers(repo_handle& src, repo_handle& dst, const oci::digest& subject,
-               std::string_view op, context& ctx) {
+               referrer_op op, context& ctx) {
     auto list = src.client.referrers(subject);
     if (!list) {
         // a registry with no referrers: nothing to copy
@@ -1045,7 +1046,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
                 if (!src) {
                     continue;
                 }
-                (void)copy_referrers(*src, *dst, *l.layer.digest(), "compose",
+                (void)copy_referrers(*src, *dst, *l.layer.digest(), referrer_op::compose,
                                      ctx);
             }
         }
@@ -1415,7 +1416,7 @@ copy(const address& srca, const target& dstt, context& ctx,
     const bool same_image = changes.empty();
     if (same_image) {
         // copy: each referrer of the image and of its layers
-        if (auto r = copy_referrers(*src, *dst, loc->digest, "copy", ctx); !r) {
+        if (auto r = copy_referrers(*src, *dst, loc->digest, referrer_op::copy, ctx); !r) {
             return unexpected{r.error()};
         }
     }
@@ -1426,7 +1427,9 @@ copy(const address& srca, const target& dstt, context& ctx,
                 continue;
             }
             auto r = copy_referrers(*src, *dst, *l.layer.digest(),
-                                    same_image ? "copy" : "compose", ctx);
+                                    same_image ? referrer_op::copy
+                                               : referrer_op::compose,
+                                    ctx);
             if (!r) {
                 return unexpected{r.error()};
             }
@@ -1519,10 +1522,11 @@ attach(const address& subject, const std::string& kind,
     if (!k) {
         return unexpected{k.error()};
     }
+    const auto on = *k == format::object_kind::image ? referrer_subject::image
+                                                      : referrer_subject::layer;
     const std::string subject_kind =
-        *k == format::object_kind::image ? "image" : "layer";
-    if (std::find(rule->subjects.begin(), rule->subjects.end(),
-                  subject_kind) == rule->subjects.end()) {
+        on == referrer_subject::image ? "image" : "layer";
+    if (!rule->subjects.contains(on)) {
         return unexpected{fmt::format("a referrer of the kind '{}' cannot be "
                                       "attached to a {}",
                                       kind, subject_kind)};

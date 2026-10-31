@@ -4,6 +4,7 @@
 #include <optional>
 
 #include <uenv/name.h>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -27,17 +28,25 @@ struct registry_config {
 
 // a registry, by name (4-registry-ops.md, "Registries and addresses")
 struct named_registry {
-    std::string name;
+    uenv::name name;
     util::url url;
-    std::optional<std::string> namespace_;
+    // the namespace: the parts of a path, each a name. Empty: no namespace
+    std::vector<uenv::name> namespace_;
 };
+
+// the objects that a kind of referrer can be attached to, and the operations
+// that it travels with
+enum class referrer_subject { image, layer };
+enum class referrer_op { copy, compose };
 
 // a site rule for a kind of referrer (4-registry-ops.md, "Site rules")
 struct referrer_rule {
+    // the name of the kind, for example uenv/sbom: names separated by '/'
     std::string name;
+    // a media type: type/subtype
     std::string artifact_type;
-    std::vector<std::string> subjects; // "image", "layer"
-    std::vector<std::string> travel;   // "copy", "compose"
+    std::set<referrer_subject> subjects;
+    std::set<referrer_op> travel;
     bool fan_out = false;
 };
 
