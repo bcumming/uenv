@@ -18,6 +18,7 @@
 #include <oci/reference.h>
 #include <oci/types.h>
 #include <uenv/format.h>
+#include <uenv/parse.h>
 #include <uenv/registry.h>
 #include <uenv/store.h>
 #include <util/expected.h>
@@ -112,61 +113,98 @@ resolve_target(const configuration& cfg,
 util::expected<address, std::string>
 parse_address(const std::string& text, const configuration& cfg,
               std::optional<std::string> registry_option) {
-    // reg[/ns]::label
-    if (auto pos = text.find("::"); pos != std::string::npos) {
-        auto left = text.substr(0, pos);
-        auto label = text.substr(pos + 2);
-        auto slash = left.find('/');
-        auto reg = left.substr(0, slash);
-        std::optional<std::string> ns;
-        if (slash != std::string::npos) {
-            ns = left.substr(slash + 1);
-        }
-        auto t = named(cfg, reg, ns);
-        if (!t) {
-            return unexpected{t.error()};
-        }
-        address a{.where = *t};
-        if (!label.empty()) {
-            a.label = label;
-        }
-        return a;
+    auto form = parse_address_text(text);
+    if (!form) {
+        return unexpected{form.error()};
     }
-    // a full reference starts with a host
-    auto first = text.substr(0, text.find('/'));
-    if (text.find('/') != std::string::npos &&
-        (first.find('.') != std::string::npos ||
-         first.find(':') != std::string::npos || first == "localhost")) {
-        auto rest = text.substr(first.size() + 1);
-        std::string repo, ref;
-        if (auto at = rest.find('@'); at != std::string::npos) {
-            repo = rest.substr(0, at);
-            ref = rest.substr(at + 1);
-        } else if (auto colon = rest.rfind(':');
-                   colon != std::string::npos &&
-                   rest.find('/', colon) == std::string::npos) {
-            repo = rest.substr(0, colon);
-            ref = rest.substr(colon + 1);
-        } else {
-            return unexpected{fmt::format(
-                "the full reference '{}' must end with a tag or a digest", text)};
+    // a label: its query. "+" alone is each layer, and an empty label is
+    // each image (find)
+    auto with_label = [&](target where, const std::string& label)
+        -> util::expected<address, std::string> {
+        address a{.where = std::move(where)};
+        if (label.empty()) {
+            return a;
         }
-        auto t = target_from_url(first, first, std::nullopt);
+        a.label = label;
+        auto marked = parse_layer_marker(label);
+        if (marked.rest.empty()) {
+            a.query = label_query{.layer = marked.layer};
+            return a;
+        }
+        auto q = parse_label_query(label, label_keys{cfg.label.at, cfg.label.percent},
+                                   cfg.system_name);
+        if (!q) {
+            return unexpected{q.error()};
+        }
+        a.query = std::move(*q);
+        return a;
+    };
+    switch (form->kind) {
+    case address_text::form::named: {
+        for (auto& part : form->ns) {
+            if (auto n = name::parse(part); !n) {
+                return unexpected{fmt::format("the namespace of '{}': {}", text,
+                                              n.error())};
+            }
+        }
+        std::optional<std::string> ns;
+        if (!form->ns.empty()) {
+            ns = fmt::format("{}", fmt::join(form->ns, "/"));
+        }
+        auto t = named(cfg, form->registry, ns);
         if (!t) {
             return unexpected{t.error()};
         }
-        return address{.where = *t, .repository = repo, .reference = ref};
+        return with_label(*t, form->label);
+    }
+    case address_text::form::reference: {
+        for (auto& part : form->repository) {
+            if (auto n = name::parse(part); !n) {
+                return unexpected{fmt::format("the repository of '{}': {}", text,
+                                              n.error())};
+            }
+        }
+        std::optional<oci::reference> ref;
+        if (form->by_digest) {
+            auto d = oci::digest::parse(form->reference);
+            if (!d) {
+                return unexpected{fmt::format("'{}' is not a valid digest",
+                                              form->reference)};
+            }
+            ref = oci::reference::digest(*d);
+        } else {
+            auto tg = oci::tag::parse(form->reference);
+            if (!tg) {
+                return unexpected{
+                    fmt::format("'{}' is not a valid tag", form->reference)};
+            }
+            ref = oci::reference::tag(*tg);
+        }
+        auto t = target_from_url(form->host, form->host, std::nullopt);
+        if (!t) {
+            return unexpected{t.error()};
+        }
+        return address{.where = *t,
+                       .ref = full_reference{
+                           .repository = fmt::format("{}", fmt::join(form->repository, "/")),
+                           .reference = *ref}};
+    }
+    case address_text::form::label:
+        break;
     }
     auto t = resolve_target(cfg, registry_option);
     if (!t) {
         return unexpected{t.error()};
     }
-    return address{.where = *t, .label = text};
+    return with_label(*t, form->label);
 }
 
 util::expected<oci::client, std::string>
 make_client(const target& t, const std::string& repository, context& ctx) {
-    auto c = oci::client::create(t.base, repository, ctx.creds);
+    // the credentials of this registry
+    auto creds = ctx.credentials ? ctx.credentials(t.base)
+                                 : std::optional<oci::credentials>{};
+    auto c = oci::client::create(t.base, repository, creds);
     if (!c) {
         return unexpected{fmt::format("{}: {}", t.base.string(),
                                       c.error().message)};
@@ -593,29 +631,20 @@ catalogue::find(const std::string& text) {
 //
 
 util::expected<located, std::string> locate(const address& a, context& ctx) {
-    if (a.repository && a.reference) {
-        auto c = make_client(a.where, *a.repository, ctx);
+    if (a.ref) {
+        auto c = make_client(a.where, a.ref->repository, ctx);
         if (!c) {
             return unexpected{c.error()};
         }
-        std::optional<oci::reference> ref;
-        if (auto d = oci::digest::parse(*a.reference)) {
-            ref = oci::reference::digest(*d);
-        } else if (auto t = oci::tag::parse(*a.reference)) {
-            ref = oci::reference::tag(*t);
-        } else {
-            return unexpected{
-                fmt::format("invalid tag or digest '{}'", *a.reference)};
-        }
-        auto m = c->get_manifest(*ref);
+        auto m = c->get_manifest(a.ref->reference);
         if (!m) {
             return unexpected{m.error().message};
         }
         std::optional<std::string> tag;
-        if (!oci::digest::parse(*a.reference)) {
-            tag = *a.reference;
+        if (a.ref->reference.is_tag()) {
+            tag = a.ref->reference.as_tag().string();
         }
-        return located{*a.repository, m->digest, tag};
+        return located{a.ref->repository, m->digest, tag};
     }
     if (!a.label) {
         return unexpected{std::string{"no image is given"}};
@@ -1153,9 +1182,9 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
     }
     // the catalogue is a copy of the configs, not checked against them: check
     // the configs against the label before the download
-    if (a.label) {
-        auto q = parse_label_query(*a.label, ctx.keys, ctx.default_system);
-        if (q && !q->id) {
+    if (a.label && a.query) {
+        const auto& q = a.query;
+        if (!q->id) {
             const auto& c = img->config();
             std::vector<std::string> bad;
             if (q->name && *q->name != c.name) {

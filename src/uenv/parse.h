@@ -48,6 +48,24 @@ struct run_item {
 util::expected<std::vector<run_item>, parse_error>
 parse_run_items(const std::string& in);
 
+// the form of a registry address (4-registry-ops.md, "Registries and
+// addresses"), on the lexer. The parts are text: the caller makes the types.
+struct address_text {
+    enum class form { label, named, reference };
+    form kind = form::label;
+    // named: reg[/ns]::label
+    std::string registry;
+    std::vector<std::string> ns;
+    // label and named: the text of the label (can be empty)
+    std::string label;
+    // reference: host/repository[:tag|@digest]
+    std::string host;
+    std::vector<std::string> repository;
+    std::string reference;
+    bool by_digest = false;
+};
+util::expected<address_text, std::string> parse_address_text(const std::string& in);
+
 // a name of a v1 label: [A-Za-z0-9_][A-Za-z0-9_.-]*, the whole input
 util::expected<std::string, parse_error> parse_name(const std::string& in);
 

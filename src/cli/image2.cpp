@@ -130,22 +130,21 @@ void print_records(const std::vector<object_record>& records, bool json_out,
     }
 }
 
-registry::context make_context(const global_settings& settings,
-                               std::optional<std::string> registry_option) {
+registry::context make_context(const global_settings& settings) {
     registry::context ctx;
     ctx.cfg = &settings.config;
     ctx.keys = keys_of(settings.config);
     ctx.default_system = settings.config.system_name;
     auto cache = user_cache_path(settings.calling_environment);
     ctx.cache = cache ? *cache : fs::temp_directory_path() / "uenv-cache";
-    if (auto t = registry::resolve_target(settings.config, registry_option)) {
-        if (auto c = resolve_registry_credentials(settings.calling_environment,
-                                                  t->base, std::nullopt,
-                                                  std::nullopt);
-            c) {
-            ctx.creds = *c;
-        }
-    }
+    // each registry uses its own credentials: the client asks for those of
+    // the registry that it connects to
+    const auto& env = settings.calling_environment;
+    ctx.credentials = [&env](const util::url& base) {
+        auto c = resolve_registry_credentials(env, base, std::nullopt,
+                                              std::nullopt);
+        return c ? std::optional<oci::credentials>{*c} : std::nullopt;
+    };
     return ctx;
 }
 
@@ -460,14 +459,13 @@ struct find_args {
 };
 
 int image_find(const find_args& args, const global_settings& settings) {
-    auto text = args.label.value_or("");
-    auto a = registry::parse_address(text.empty() ? "x" : text, settings.config,
+    auto a = registry::parse_address(args.label.value_or(""), settings.config,
                                      args.registry);
     if (!a) {
         term::error("{}", a.error());
         return 1;
     }
-    auto ctx = make_context(settings, args.registry);
+    auto ctx = make_context(settings);
     auto cat = registry::catalogue::open(a->where, ctx);
     if (!cat) {
         term::error("{}", cat.error());
@@ -480,18 +478,10 @@ int image_find(const find_args& args, const global_settings& settings) {
     }
     spdlog::info("catalogue refresh: {} events, {} requests", st->events,
                  st->requests);
+    // the query of the label; with no label, each image of the system
     label_query q;
-    auto label = text.empty() ? std::string{} : a->label.value_or("");
-    if (label == "+") {
-        q.layer = true;
-    } else if (!label.empty()) {
-        auto p = parse_label_query(label, keys_of(settings.config),
-                                   settings.config.system_name);
-        if (!p) {
-            term::error("{}", p.error());
-            return 1;
-        }
-        q = *p;
+    if (a->query) {
+        q = *a->query;
     } else if (settings.config.system_name) {
         q.meta[settings.config.label.at] = *settings.config.system_name;
     }
@@ -525,7 +515,7 @@ int image_pull(const pull_args& args, const global_settings& settings) {
         term::error("{}", a.error());
         return 1;
     }
-    auto ctx = make_context(settings, args.registry);
+    auto ctx = make_context(settings);
     auto r = registry::pull(*s, *a, ctx);
     if (!r) {
         term::error("{}", r.error());
@@ -565,7 +555,7 @@ int image_push(const push_args& args, const global_settings& settings) {
         }
         t = *r;
     }
-    auto ctx = make_context(settings, args.registry);
+    auto ctx = make_context(settings);
     std::error_code ec;
     util::expected<registry::push_result, std::string> r =
         util::unexpected{std::string{}};
@@ -633,7 +623,7 @@ int image_copy(const copy_args& args, const global_settings& settings) {
         }
         changes = std::move(*c);
     }
-    auto ctx = make_context(settings, args.registry);
+    auto ctx = make_context(settings);
     auto r = registry::copy(*src, dst->where, ctx, changes);
     if (!r) {
         term::error("{}", r.error());
@@ -660,7 +650,7 @@ int image_delete(const delete_args& args, const global_settings& settings) {
         term::error("{}", a.error());
         return 1;
     }
-    auto ctx = make_context(settings, args.registry);
+    auto ctx = make_context(settings);
     auto r = registry::remove(*a, ctx);
     if (!r) {
         term::error("{}", r.error());
@@ -688,7 +678,7 @@ int image_attach(const attach_args& args, const global_settings& settings) {
         term::error("{}", a.error());
         return 1;
     }
-    auto ctx = make_context(settings, args.registry);
+    auto ctx = make_context(settings);
     auto r = registry::attach(*a, args.kind, args.content, ctx);
     if (!r) {
         term::error("{}", r.error());

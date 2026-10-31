@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include <oci/reference.h>
 #include <oci/auth.h>
 #include <oci/client.h>
 #include <oci/digest.h>
@@ -36,15 +37,20 @@ struct target {
     }
 };
 
+// a full reference: a repository (with no prefix) and a tag or a digest
+struct full_reference {
+    std::string repository;
+    oci::reference reference;
+};
+
 // an address on the command line (4-registry-ops.md, "Registries and
-// addresses")
+// addresses"). A label is parsed into its query; the catalogue (a choice of
+// the spike) also reads its text.
 struct address {
     target where;
-    // a label (with the layer marker), or an id
     std::optional<std::string> label;
-    // a full reference: the repository (with no prefix) and a tag or digest
-    std::optional<std::string> repository;
-    std::optional<std::string> reference;
+    std::optional<label_query> query;
+    std::optional<full_reference> ref;
 };
 
 // the registry of an address with no registry, or of --registry
@@ -74,7 +80,8 @@ struct stats {
 
 struct context {
     const configuration* cfg = nullptr;
-    std::optional<oci::credentials> creds;
+    // the credentials of a registry, by its url: each registry uses its own
+    std::function<std::optional<oci::credentials>(const util::url&)> credentials;
     // the directory of the local copies of the catalogues
     std::filesystem::path cache;
     label_keys keys;

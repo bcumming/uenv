@@ -241,12 +241,57 @@ TEST_CASE("4/addresses: the three forms", "[registry-addr]") {
     auto full = reg::parse_address(
         "ghcr.io/wombat/soup/prgenv-gnu:26.6-v2-3fa9c2e1d04b7a65", cfg, {});
     REQUIRE(full);
-    REQUIRE(*full->repository == "wombat/soup/prgenv-gnu");
-    REQUIRE(*full->reference == "26.6-v2-3fa9c2e1d04b7a65");
+    REQUIRE(full->ref->repository == "wombat/soup/prgenv-gnu");
+    REQUIRE(full->ref->reference.as_tag().string() == "26.6-v2-3fa9c2e1d04b7a65");
     // a registry name that does not exist is an error that lists them
     auto bad = reg::parse_address("nope::foo", cfg, {});
     REQUIRE(!bad);
     REQUIRE(bad.error().find("community") != std::string::npos);
+}
+
+TEST_CASE("4/addresses: each part is parsed, and each registry has its own "
+          "credentials",
+          "[registry-addr]") {
+    uenv::configuration cfg;
+    cfg.registries = {
+        {.name = "deploy", .url = *util::parse_url("https://jfrog.svc.cscs.ch/uenv")},
+        {.name = "community", .url = *util::parse_url("https://ghcr.io")}};
+    cfg.default_registry = "deploy";
+    // a full reference by digest
+    auto d = reg::parse_address(
+        "localhost:5000/lab/tools@sha256:"
+        "3fa9c2e1d04b7a65aaaabbbbccccddddeeeeffff000011112222333344445555",
+        cfg, {});
+    REQUIRE(d);
+    REQUIRE(d->ref->repository == "lab/tools");
+    REQUIRE(d->ref->reference.is_digest());
+    // a label is parsed into its query once
+    auto l = reg::parse_address("community::+tools/1.0:v1", cfg, {});
+    REQUIRE(l);
+    REQUIRE(l->query->layer);
+    REQUIRE(l->query->name == nm("tools"));
+    for (auto bad : {"ghcr.io/lab/tools", "ghcr.io/lab/tools@sha256:x",
+                     "ghcr.io/lab//tools:v1", "deploy/a b::foo",
+                     "my.app/1.0:v1+x", "deploy::sha256:%"}) {
+        INFO(bad);
+        REQUIRE(!reg::parse_address(bad, cfg, {}));
+    }
+    // the client of a registry asks for the credentials of that registry (no
+    // registry runs on these ports: only the question is checked)
+    reg::context ctx;
+    std::vector<std::string> asked;
+    ctx.credentials = [&](const util::url& u) {
+        asked.push_back(u.string());
+        return std::optional<oci::credentials>{};
+    };
+    auto one = reg::parse_address("localhost:1/lab/a:v1", cfg, {});
+    auto two = reg::parse_address("localhost:2/lab/b:v1", cfg, {});
+    REQUIRE((one && two));
+    (void)reg::make_client(one->where, "lab/a", ctx);
+    (void)reg::make_client(two->where, "lab/b", ctx);
+    REQUIRE(asked.size() == 2u);
+    REQUIRE(asked[0].find("localhost:1") != std::string::npos);
+    REQUIRE(asked[1].find("localhost:2") != std::string::npos);
 }
 
 TEST_CASE("4/push and pull an image", "[registry]") {

@@ -205,6 +205,104 @@ parse_run_items(const std::string& in) {
     return items;
 }
 
+util::expected<address_text, std::string> parse_address_text(const std::string& in) {
+    auto fail = [&](const std::string& why) {
+        return util::unexpected{fmt::format("invalid address '{}': {}", in, why)};
+    };
+    std::vector<lex::token> toks;
+    {
+        auto L = lex::lexer(in);
+        while (L.current_kind() != lex::tok::end) {
+            toks.push_back(L.next());
+        }
+    }
+    // the names of reg[/ns], separated by '/'
+    auto names_of = [&](std::size_t from, std::size_t to)
+        -> util::expected<std::vector<std::string>, std::string> {
+        std::vector<std::string> out;
+        std::size_t start = from;
+        for (std::size_t i = from; i <= to; ++i) {
+            if (i == to || toks[i].kind == lex::tok::slash) {
+                if (i == start) {
+                    return fail("a part between two '/' is empty");
+                }
+                const auto b = toks[start].loc;
+                const auto e = i == to ? (to < toks.size() ? toks[to].loc
+                                                           : unsigned(in.size()))
+                                       : toks[i].loc;
+                out.emplace_back(in.substr(b, e - b));
+                start = i + 1;
+            }
+        }
+        return out;
+    };
+    // reg[/ns]::label
+    for (std::size_t i = 0; i + 1 < toks.size(); ++i) {
+        if (toks[i].kind == lex::tok::colon && toks[i + 1].kind == lex::tok::colon) {
+            if (i == 0) {
+                return fail("'::' needs a registry before it");
+            }
+            auto parts = names_of(0, i);
+            if (!parts) {
+                return util::unexpected{parts.error()};
+            }
+            address_text a{.kind = address_text::form::named};
+            a.registry = parts->front();
+            a.ns.assign(parts->begin() + 1, parts->end());
+            a.label = in.substr(toks[i + 1].loc + 1);
+            return a;
+        }
+    }
+    // a full reference starts with a host: the first part contains '.' or
+    // ':', or is localhost
+    std::size_t slash = 0;
+    while (slash < toks.size() && toks[slash].kind != lex::tok::slash) {
+        ++slash;
+    }
+    bool host = false;
+    for (std::size_t i = 0; i < slash && slash < toks.size(); ++i) {
+        host = host || toks[i].kind == lex::tok::dot || toks[i].kind == lex::tok::colon;
+    }
+    if (slash < toks.size() && in.substr(0, toks[slash].loc) == "localhost") {
+        host = true;
+    }
+    if (!host) {
+        return address_text{.kind = address_text::form::label, .label = in};
+    }
+    address_text a{.kind = address_text::form::reference,
+                   .host = std::string(in.substr(0, toks[slash].loc))};
+    // the reference: '@' and a digest, else ':' and a tag after the last '/'
+    std::size_t end = toks.size();
+    for (std::size_t i = slash + 1; i < toks.size(); ++i) {
+        if (toks[i].kind == lex::tok::at) {
+            end = i;
+            a.by_digest = true;
+            break;
+        }
+    }
+    if (!a.by_digest) {
+        for (std::size_t i = toks.size(); i-- > slash + 1;) {
+            if (toks[i].kind == lex::tok::slash) {
+                break;
+            }
+            if (toks[i].kind == lex::tok::colon) {
+                end = i;
+                break;
+            }
+        }
+    }
+    if (end == toks.size()) {
+        return fail("a full reference must end with a tag or a digest");
+    }
+    auto repo = names_of(slash + 1, end);
+    if (!repo) {
+        return util::unexpected{repo.error()};
+    }
+    a.repository = std::move(*repo);
+    a.reference = in.substr(toks[end].loc + 1);
+    return a;
+}
+
 util::expected<std::string, parse_error> parse_name(const std::string& in) {
     auto L = lex::lexer(in);
     auto result = parse_name(L);
