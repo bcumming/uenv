@@ -66,6 +66,14 @@ struct address_text {
 };
 util::expected<address_text, std::string> parse_address_text(const std::string& in);
 
+// the 'from' of a layer in a compose file: "[+]label" (a layer), or
+// "label#alias" (the layer with that alias in an image), on the lexer
+struct compose_from {
+    std::string label;
+    std::optional<std::string> alias;
+};
+util::expected<compose_from, std::string> parse_compose_from(const std::string& in);
+
 // a name of a v1 label: [A-Za-z0-9_][A-Za-z0-9_.-]*, the whole input
 util::expected<std::string, parse_error> parse_name(const std::string& in);
 

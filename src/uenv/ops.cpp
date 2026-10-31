@@ -515,23 +515,28 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
                 std::string{"each layer needs a string 'from'"}};
         }
         const auto from = e["from"].get<std::string>();
+        auto parts = parse_compose_from(from);
+        if (!parts) {
+            return unexpected{fmt::format("the compose file: {}", parts.error())};
+        }
+        auto q = parse_label_query(parts->label, keys);
+        if (!q) {
+            return unexpected{fmt::format("the compose file: the layer '{}': {}",
+                                          from, q.error())};
+        }
         std::optional<layer> src;
-        if (auto hash = from.find('#'); hash != std::string::npos) {
-            auto q = parse_label_query(from.substr(0, hash), keys);
-            if (!q) {
-                return unexpected{q.error()};
-            }
+        if (parts->alias) {
             auto r = s.query(*q);
             if (!r || r->size() != 1u) {
                 return unexpected{fmt::format(
                     "the image '{}' is not unique, or not in the repository",
-                    from.substr(0, hash))};
+                    parts->label)};
             }
             auto img = s.load(r->front().digest);
             if (!img) {
                 return unexpected{img.error()};
             }
-            auto alias = uenv::name::parse(from.substr(hash + 1));
+            auto alias = uenv::name::parse(*parts->alias);
             if (!alias) {
                 return unexpected{fmt::format(
                     "the compose file: the layer '{}': the alias {}", from,
@@ -544,15 +549,11 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
             }
             if (!src) {
                 return unexpected{fmt::format(
-                    "the image '{}' has no layer '{}'", from.substr(0, hash),
-                    *alias)};
+                    "the image '{}' has no layer '{}'", parts->label, *alias)};
             }
         } else {
-            auto text = from.starts_with("+") ? from : "+" + from;
-            auto q = parse_label_query(text, keys);
-            if (!q) {
-                return unexpected{q.error()};
-            }
+            // a 'from' with no alias is a layer: the marker is optional
+            q->layer = true;
             auto r = s.query(*q);
             if (!r) {
                 return unexpected{r.error()};

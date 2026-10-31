@@ -447,6 +447,16 @@ TEST_CASE("1/compose: an image from layers", "[store][compose]") {
     REQUIRE(r->layers[0].digest == pe.digest);
     REQUIRE(r->layers[1].digest == t.digest);
 
+    SECTION("the 'from' of a layer is parsed") {
+        for (auto bad : {"+tools/1.0:v1#a#b", "my-env#a b", "+tools/1.0 :v1"}) {
+            INFO(bad);
+            auto e = spec;
+            e["layers"][0]["from"] = bad;
+            auto m = uenv::compose(s, e, {});
+            REQUIRE(!m);
+            REQUIRE(m.error().find("the compose file") != std::string::npos);
+        }
+    }
     SECTION("an alias is a name") {
         for (auto bad : {json("my tools"), json(42), json("a:b")}) {
             INFO(bad.dump());

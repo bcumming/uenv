@@ -205,6 +205,26 @@ parse_run_items(const std::string& in) {
     return items;
 }
 
+util::expected<compose_from, std::string> parse_compose_from(const std::string& in) {
+    auto L = lex::lexer(in);
+    std::optional<unsigned> hash;
+    while (L.current_kind() != lex::tok::end) {
+        auto t = L.next();
+        if (t.kind == lex::tok::hash) {
+            if (hash) {
+                return util::unexpected{
+                    fmt::format("the layer '{}' has more than one '#'", in)};
+            }
+            hash = t.loc;
+        }
+    }
+    if (!hash) {
+        return compose_from{.label = in};
+    }
+    return compose_from{.label = in.substr(0, *hash),
+                        .alias = in.substr(*hash + 1)};
+}
+
 util::expected<address_text, std::string> parse_address_text(const std::string& in) {
     auto fail = [&](const std::string& why) {
         return util::unexpected{fmt::format("invalid address '{}': {}", in, why)};
