@@ -250,9 +250,6 @@ add_squashfs(store& s, const fs::path& sqfs, const layer_config& cfg,
             "a layer needs a name, a version and a release, for example "
             "prgenv-gnu/24.11:v1"}};
     }
-    if (auto r = format::check_relocatable(cfg); !r) {
-        return unexpected{r.error()};
-    }
     // 1. hash the file, and make the layer config and the layer manifest
     auto sqfs_digest = s.put_file(sqfs, progress);
     if (!sqfs_digest) {
@@ -377,38 +374,8 @@ util::expected<void, std::string> check_nested_mounts(const composed_image& img)
     return {};
 }
 
-std::vector<std::string> compose_warnings(const composed_image& img) {
-    std::vector<std::string> out;
-    for (auto& l : img.layers) {
-        if (l.mount == l.layer.mount) {
-            continue;
-        }
-        // the old path can be the mount point of a different layer
-        bool used = false;
-        for (auto& o : img.layers) {
-            if (o.mount == l.layer.mount) {
-                used = true;
-            }
-        }
-        if (used) {
-            continue;
-        }
-        for (auto& [name, v] : img.views) {
-            for (auto& var :
-                 format::patch_mentions(v.env, l.layer.mount.string())) {
-                out.push_back(fmt::format(
-                    "the image view '{}' sets {} with the path {}, but the "
-                    "layer '{}' is now at {}",
-                    name, var, l.layer.mount, l.alias, l.mount));
-            }
-        }
-    }
-    return out;
-}
-
 util::expected<object_record, std::string>
-compose(store& s, const nlohmann::json& spec, const label_keys& keys,
-        std::vector<std::string>* warnings) {
+compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
     if (!spec.is_object()) {
         return unexpected{std::string{"the compose file must be an object"}};
     }
@@ -482,10 +449,6 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
             }
             src = img->layers.front().layer;
         }
-        if (auto r = format::check_relocatable(format::layer_config_of(*src));
-            !r) {
-            return unexpected{r.error()};
-        }
         auto mount = src->mount;
         if (auto m = e.find("mount"); m != e.end()) {
             auto mp = m->is_string() ? mount_point::parse(m->get<std::string>())
@@ -509,12 +472,6 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
     }
     if (auto r = check_nested_mounts(*img); !r) {
         return unexpected{r.error()};
-    }
-    for (auto& w : compose_warnings(*img)) {
-        spdlog::warn("{}", w);
-        if (warnings) {
-            warnings->push_back(w);
-        }
     }
     return write_image(s, *img);
 }

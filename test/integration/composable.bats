@@ -39,9 +39,6 @@ function setup_file() {
   "default_view": "tools"
 }
 JSON
-    # a relocatable layer config with an absolute path: refused
-    sed 's|@uenv-root@/bin|/user-environment/tools/bin|' "$FIX/reltools.json" > "$FIX/bad.json"
-
     # the v1 repository fixture, for the migration
     export V1_FIXTURE="$REPOS/apptool"
 
@@ -181,12 +178,6 @@ function json_field() {
     assert_output --partial "building block"
     # the layers inside images are listed too
     assert_output --partial "+app/42.0:v1"
-}
-
-@test "2/configs: a relocatable layer with its mount point in a view is refused" {
-    run uenv $R image add +bad/1.0:v1 "$FIX/reltools.squashfs" --config "$FIX/bad.json"
-    assert_failure
-    assert_output --partial "use @uenv-root@"
 }
 
 @test "1/mount points: a mount point that UENV_MOUNT_LIST cannot hold is refused" {
@@ -361,25 +352,6 @@ EOF
     assert_failure
     assert_output --partial "the layer 'reltools' is mounted at /user-environment/nope"
     assert_output --partial "'app' has no directory /nope"
-}
-
-@test "1/compose: a warning for the old path of a moved layer" {
-    add_fixtures
-    # the author moves reltools, and does not change MY_TOOLS_ROOT
-    cat > "$TMP/c.json" <<'EOF'
-{"name": "stale", "version": "1.0", "release": "v1", "meta": {},
- "views": {"dev": {"include": ["reltools:tools"],
-                   "env": {"scalar": {"MY_TOOLS_ROOT": "/user-environment/tools"}}}},
- "default_view": "dev",
- "layers": [{"from": "+reltools", "mount": "/user-tools"}]}
-EOF
-    run uenv $R image compose "$TMP/c.json"
-    assert_success
-    assert_output --partial "sets MY_TOOLS_ROOT with the path /user-environment/tools"
-    # no warning when the path is correct
-    sed -i 's|"MY_TOOLS_ROOT": "/user-environment/tools"|"MY_TOOLS_ROOT": "/user-tools"|' "$TMP/c.json"
-    run uenv $R image compose "$TMP/c.json"
-    refute_output --partial "warning"
 }
 
 @test "6/a squashfs file: start it directly" {

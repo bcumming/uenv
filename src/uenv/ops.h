@@ -94,8 +94,7 @@ find_unique(std::vector<store>& stores, const label_query& q,
 // compose an image from a compose file (JSON): the image config, plus
 // "layers": [{"alias", "mount", "from"}]. Each layer must be in the store.
 util::expected<object_record, std::string>
-compose(store& s, const nlohmann::json& spec, const label_keys& keys,
-        std::vector<std::string>* warnings = nullptr);
+compose(store& s, const nlohmann::json& spec, const label_keys& keys);
 
 // check that each nested mount point is a directory in its parent layer, with
 // unsquashfs (1-composition.md, "Nested mount points")
@@ -112,9 +111,6 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
 // privileged code. Do not "consolidate" the two checks into one.
 util::expected<void, std::string> check_nested_mounts(const composed_image& img);
 
-// the warnings of a composed image: an image view env that contains the
-// build mount point of a layer that the image moves
-std::vector<std::string> compose_warnings(const composed_image& img);
 
 // resolve the list of uenv run/start or srun --uenv, and make one
 // composed_image: the item itself for one item, else a runtime merge

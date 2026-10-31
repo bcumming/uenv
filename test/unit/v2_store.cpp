@@ -428,37 +428,6 @@ TEST_CASE("1/compose: an image from layers", "[store][compose]") {
     }
 }
 
-TEST_CASE("1/compose: a stale path in an image view env is a warning",
-          "[store][compose]") {
-    auto s = new_store();
-    REQUIRE(uenv::add_squashfs(s, fake_sqfs(tmpdir(), "t"), cfg_of(tools()), {},
-                               true));
-    auto spec = json::parse(R"({
-      "name": "x", "version": "1", "release": "v1", "meta": {},
-      "views": {"dev": {"include": ["tools:tools"],
-                        "env": {"scalar": {"T": "/user-environment/tools/share"}}}},
-      "layers": [{"from": "+tools", "mount": "/opt/tools"}]})");
-    std::vector<std::string> w;
-    REQUIRE(uenv::compose(s, spec, {}, &w));
-    REQUIRE(w.size() == 1u);
-    // a different layer at the old path: no warning
-    spec["layers"].push_back({{"from", "+tools"}, {"alias", "t2"},
-                              {"mount", "/user-environment/tools"}});
-    w.clear();
-    REQUIRE(uenv::compose(s, spec, {}, &w));
-    REQUIRE(w.empty());
-}
-
-TEST_CASE("1/compose: a relocatable layer with an absolute path is refused",
-          "[store][compose]") {
-    auto s = new_store();
-    auto bad = make_layer("bad", "/opt/bad", true,
-                          {{"v", prepend("PATH", "/opt/bad/bin")}});
-    // add refuses it
-    REQUIRE(!uenv::add_squashfs(s, fake_sqfs(tmpdir(), "bad"), cfg_of(bad), {},
-                                true));
-}
-
 TEST_CASE("6/rollout: a read-only v1 repository does not block a v2 one",
           "[store]") {
     auto site = tmpdir() / "site";

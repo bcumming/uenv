@@ -217,22 +217,6 @@ TEST_CASE("1/views: a value and a prefix path in one patch warn", "[config]") {
     REQUIRE(warnings.size() == 1u);
 }
 
-TEST_CASE("1/views: a relocatable layer must not contain its mount point",
-          "[config]") {
-    auto c = *format::parse_layer_config(layer_config_json().dump());
-    REQUIRE(format::check_relocatable(c));
-    c.views["tools"].env =
-        prepend("PATH", "/user-environment/tools/bin");
-    REQUIRE(!format::check_relocatable(c));
-    // a different path that starts with the mount point is not a match
-    c.views["tools"].env = prepend("PATH", "/user-environment/tools2/bin");
-    REQUIRE(format::check_relocatable(c));
-    // a value with no '/' after the root, the case that motivates the
-    // placeholder
-    c.views["tools"].env = set_value("FLAGS", "-DMOUNT=/user-environment/tools\t-I");
-    REQUIRE(!format::check_relocatable(c));
-}
-
 //
 // 1-composition "Checks"
 //

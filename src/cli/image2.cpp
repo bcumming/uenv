@@ -420,11 +420,7 @@ int image_compose(const compose_args& args, const global_settings& settings) {
         term::error("{} is not valid JSON", args.file);
         return 1;
     }
-    std::vector<std::string> warnings;
-    auto r = compose(*s, spec, keys_of(settings.config), &warnings);
-    for (auto& w : warnings) {
-        term::warn("{}", w);
-    }
+    auto r = compose(*s, spec, keys_of(settings.config));
     if (!r) {
         term::error("{}", r.error());
         return 1;
