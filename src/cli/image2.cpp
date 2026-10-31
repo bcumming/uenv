@@ -217,12 +217,21 @@ int image_add(const add_args& args, const global_settings& settings) {
                     args.label);
         return 1;
     }
-    const fs::path sqfs = fs::absolute(args.squashfs);
+    auto parsed_sqfs = parse_file_path(args.squashfs);
+    if (!parsed_sqfs) {
+        term::error("{}", parsed_sqfs.error());
+        return 1;
+    }
+    const fs::path sqfs = *parsed_sqfs;
     // the layer config: from the file that the user gives, else from the
     // meta/env.json of the squashfs
     auto cfg = [&]() -> util::expected<layer_config, std::string> {
         if (args.config) {
-            auto body = util::read_file(*args.config);
+            auto file = parse_file_path(*args.config);
+            if (!file) {
+                return util::unexpected{file.error()};
+            }
+            auto body = util::read_file(*file);
             if (!body) {
                 return util::unexpected{body.error()};
             }
@@ -427,7 +436,12 @@ int image_compose(const compose_args& args, const global_settings& settings) {
         term::error("{}", s.error());
         return 1;
     }
-    auto body = util::read_file(args.file);
+    auto file = parse_file_path(args.file);
+    if (!file) {
+        term::error("{}", file.error());
+        return 1;
+    }
+    auto body = util::read_file(*file);
     if (!body) {
         term::error("{}", body.error());
         return 1;
@@ -556,11 +570,12 @@ int image_push(const push_args& args, const global_settings& settings) {
         t = *r;
     }
     auto ctx = make_context(settings);
-    std::error_code ec;
     util::expected<registry::push_result, std::string> r =
         util::unexpected{std::string{}};
-    if (fs::is_directory(args.source, ec)) {
-        r = registry::push_layout(args.source, *t, ctx);
+    // a path (it starts with '/' or '.') is an OCI layout directory, else a
+    // label: the form of the text decides, not the files that exist
+    if (auto dir = parse_file_path(args.source)) {
+        r = registry::push_layout(*dir, *t, ctx);
     } else {
         auto stores = open_stores(settings.config);
         if (!stores) {
@@ -679,7 +694,17 @@ int image_attach(const attach_args& args, const global_settings& settings) {
         return 1;
     }
     auto ctx = make_context(settings);
-    auto r = registry::attach(*a, args.kind, args.content, ctx);
+    // a path (it starts with '/' or '.') is a file to read, else the content
+    std::string content = args.content;
+    if (auto file = parse_file_path(args.content)) {
+        auto b = util::read_file(*file);
+        if (!b) {
+            term::error("{}", b.error());
+            return 1;
+        }
+        content = std::move(*b);
+    }
+    auto r = registry::attach(*a, args.kind, content, ctx);
     if (!r) {
         term::error("{}", r.error());
         return 1;

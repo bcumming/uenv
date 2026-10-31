@@ -1527,16 +1527,7 @@ attach(const address& subject, const std::string& kind,
                                       "attached to a {}",
                                       kind, subject_kind)};
     }
-    std::string bytes = content;
-    std::error_code ec;
-    if (fs::is_regular_file(content, ec)) {
-        auto b = util::read_file(content);
-        if (!b) {
-            return unexpected{b.error()};
-        }
-        bytes = *b;
-    }
-    auto blob = format::make_blob(bytes);
+    auto blob = format::make_blob(content);
     auto empty = format::make_blob(std::string(oci::empty_config_body));
     json m{{"schemaVersion", 2},
            {"mediaType", oci::media_type_manifest},

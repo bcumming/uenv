@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <uenv/migrate.h>
+#include <uenv/parse.h>
 #include <uenv/store.h>
 #include <util/expected.h>
 
@@ -29,21 +30,22 @@ struct repo_args {
     bool force = false;
 };
 
-std::optional<fs::path> repo_path(const repo_args& args,
-                                  const global_settings& settings) {
+// the path of the repository: the argument (parsed), else the user repository
+util::expected<fs::path, std::string> repo_path(const repo_args& args,
+                                                const global_settings& settings) {
     if (args.path) {
-        return fs::absolute(*args.path);
+        return parse_file_path(*args.path);
     }
     if (auto r = settings.config.user_repo()) {
         return r->path;
     }
-    return std::nullopt;
+    return util::unexpected{std::string{"no repository path is given"}};
 }
 
 int repo_create(const repo_args& args, const global_settings& settings) {
     auto p = repo_path(args, settings);
     if (!p) {
-        term::error("no repository path is given");
+        term::error("{}", p.error());
         return 1;
     }
     auto s = store::create(*p);
@@ -58,7 +60,7 @@ int repo_create(const repo_args& args, const global_settings& settings) {
 int repo_status(const repo_args& args, const global_settings& settings) {
     auto p = repo_path(args, settings);
     if (!p) {
-        term::error("no repository path is given");
+        term::error("{}", p.error());
         return 1;
     }
     // the v1 images that are not in the v2 part: no hash, no write
@@ -115,7 +117,7 @@ int repo_status(const repo_args& args, const global_settings& settings) {
 int repo_update(const repo_args& args, const global_settings& settings) {
     auto p = repo_path(args, settings);
     if (!p) {
-        term::error("no repository path is given");
+        term::error("{}", p.error());
         return 1;
     }
     auto s = store::open(*p, false);
@@ -138,7 +140,7 @@ int repo_update(const repo_args& args, const global_settings& settings) {
 int repo_migrate(const repo_args& args, const global_settings& settings) {
     auto p = repo_path(args, settings);
     if (!p) {
-        term::error("no repository path is given");
+        term::error("{}", p.error());
         return 1;
     }
     auto r = migrate_v1(*p, {},

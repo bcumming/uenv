@@ -182,6 +182,7 @@ util::expected<push_result, std::string> remove(const address& a,
 util::expected<std::vector<std::string>, std::string>
 attach(const address& subject, const std::string& kind,
        const std::string& content, context& ctx);
+// content: the bytes of the referrer
 
 // the referrers of an object in a repository
 util::expected<std::vector<oci::descriptor>, std::string>
