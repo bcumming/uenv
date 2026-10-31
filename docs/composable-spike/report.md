@@ -94,16 +94,18 @@ design sections and their tests.
 
 | part        | file                                | cases | what it uses                       |
 | ----------- | ----------------------------------- | ----- | ---------------------------------- |
-| model       | `test/unit/v2_model.cpp`            | 45    | memory only                        |
-| repository  | `test/unit/v2_store.cpp`            | 17    | temporary repositories, `fork`     |
-| registry    | `test/unit/v2_registry.cpp`         | 19    | a zot that the tests start         |
+| model       | `test/unit/v2_model.cpp`            | 53    | memory only                        |
+| repository  | `test/unit/v2_store.cpp`            | 19    | temporary repositories, `fork`     |
+| registry    | `test/unit/v2_registry.cpp`         | 20    | a zot that the tests start         |
 | end to end  | `test/integration/composable.bats`  | 32    | the CLI, real mounts, zot          |
 
 ### What each part checks
 
 - **Model** (`[jcs]`, `[config]`, `[model]`, `[env]`, `[concretise]`,
   `[oci-layout]`): the RFC 8785 test vectors for the key order. The strict
-  parser, the parse of view references, unknown fields, and the refusal of a
+  parser, and the parse of each value where it enters: names, mount points,
+  view references, variable names, inline data, `--set`, the items of a
+  run, and the forms of an address. Unknown fields, and the refusal of a
   later version. The five checks of a `composed_image`. Each permutation of
   three layers gives the same digest, mounts and environment. Raise and
   `--force`. The runtime merge: images with more than one layer, view names
@@ -135,7 +137,7 @@ design sections and their tests.
 
 | run                                                   | result                                          |
 | ----------------------------------------------------- | ----------------------------------------------- |
-| `build-v2/test/unit` (all, old and new)               | 5091 assertions pass                            |
+| `build-v2/test/unit` (all, old and new)               | 5275 assertions pass                            |
 | `build-v2/test/bats test/composable.bats`             | 32 of 32 pass, with real mounts and zot         |
 | new unit tests with AddressSanitizer                  | all pass, no ASan error                         |
 | registry tests on distribution `registry:2`           | 18 of 23 pass (see R3 in section 4)             |
@@ -167,6 +169,10 @@ UENV_TEST_REGISTRY=http://127.0.0.1:5000 ./test/unit "[registry]~[gc]"
 
 ### What the tests show
 
+- **Each value is parsed one time, where it enters uenv.** A config, a
+  database row, a compose file, a label or an address with a value that is
+  not valid gives an error that names the input. No text of the user
+  reaches an SQL pattern. A damaged database row is an error, not a crash.
 - **The order of layers has no meaning.** Each permutation gives the same
   identity, mounts and environment.
 - **The identity is reproducible.** The same file and label give the same id
