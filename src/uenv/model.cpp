@@ -59,7 +59,7 @@ make_composed_image_impl(std::optional<oci::digest> digest, config cfg,
         return unexpected{model_error{"an image must have at least one layer"}};
     }
     std::set<std::string> aliases;
-    std::set<std::string> mounts;
+    std::set<mount_point> mounts;
     for (auto& l : layers) {
         if (l.alias.empty()) {
             return unexpected{fmt::format("a layer has an empty alias")};
@@ -67,10 +67,6 @@ make_composed_image_impl(std::optional<oci::digest> digest, config cfg,
         if (!aliases.insert(l.alias).second) {
             return unexpected{
                 fmt::format("two layers have the same alias '{}'", l.alias)};
-        }
-        if (auto r = validate_mount_point(l.mount); !r) {
-            return unexpected{
-                fmt::format("layer '{}': {}", l.alias, r.error())};
         }
         if (!mounts.insert(l.mount).second) {
             return unexpected{fmt::format(
@@ -143,6 +139,17 @@ util::expected<void, model_error> validate_mount_point(const std::string& m) {
     return {};
 }
 
+layer layer::make(layer_config cfg, storage store,
+                  std::optional<oci::descriptor> manifest) {
+    return layer{.manifest = std::move(manifest),
+                 .store = std::move(store),
+                 .config = std::move(cfg.shared),
+                 .mount = std::move(cfg.mount),
+                 .relocatable = cfg.relocatable,
+                 .views = std::move(cfg.views),
+                 .default_view = std::move(cfg.default_view)};
+}
+
 util::expected<composed_image, model_error>
 make_composed_image(std::optional<oci::digest> digest, config cfg,
                     std::vector<named_layer> layers,
@@ -163,9 +170,9 @@ make_composed_image(std::optional<oci::digest> digest, config cfg,
 }
 
 util::expected<composed_image, model_error>
-raise_layer(const layer& l, std::optional<std::string> mount, bool force,
+raise_layer(const layer& l, std::optional<mount_point> mount, bool force,
             std::optional<std::string> alias) {
-    const std::string m = mount.value_or(l.mount);
+    const mount_point m = mount.value_or(l.mount);
     bool forced = false;
     if (m != l.mount && !l.relocatable) {
         if (!force) {
@@ -328,12 +335,13 @@ runtime_merge(std::vector<runtime_merge_item> items) {
     return result;
 }
 
-envvars::patch replace_root(const envvars::patch& p, const std::string& mount) {
+envvars::patch replace_root(const envvars::patch& p, const mount_point& mount) {
     envvars::patch out;
     for (auto& [name, s] : p.scalars()) {
         if (s.value) {
             out.update_scalar(name,
-                              replace_all(*s.value, uenv_root_placeholder, mount));
+                              replace_all(*s.value, uenv_root_placeholder,
+                                          mount.string()));
         } else {
             out.update_scalar(name, std::nullopt);
         }
@@ -341,7 +349,7 @@ envvars::patch replace_root(const envvars::patch& p, const std::string& mount) {
     for (auto& [name, pp] : p.prefix_paths()) {
         for (auto u : pp.updates()) {
             for (auto& v : u.values) {
-                v = replace_all(v, uenv_root_placeholder, mount);
+                v = replace_all(v, uenv_root_placeholder, mount.string());
             }
             out.update_prefix_path(name, u);
         }

@@ -40,7 +40,7 @@ fs::path fake_sqfs(const fs::path& dir, const std::string& name,
     return write_file(dir / (name + ".squashfs"), content);
 }
 
-format::layer_config cfg_of(uenv::layer l) {
+uenv::layer_config cfg_of(uenv::layer l) {
     return format::layer_config_of(l);
 }
 

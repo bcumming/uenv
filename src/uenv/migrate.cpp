@@ -128,25 +128,25 @@ migrate_v1(const fs::path& root, migrate_options opts,
             report.hashed++;
             sqfs = oci::digest::sha256(*h);
         }
-        auto cfg = v1::make_layer_config(
+        auto c = v1::make_layer_config(
             *meta, v1::v1_label{r.version, r.tag, r.system, r.uarch});
+        if (!c) {
+            report.failed++;
+            report.errors.push_back(fmt::format("{}: {}", label, c.error()));
+            continue;
+        }
+        auto cfg = std::move(*c);
         cfg.shared.name = r.name;
-        layer l;
-        l.store.digest = *sqfs;
-        l.store.size = fs::file_size(paths.squashfs);
-        l.config = cfg.shared;
-        l.mount = cfg.mount;
-        l.relocatable = false;
-        l.views = cfg.views;
-        l.default_view = cfg.default_view;
-        auto lo = format::make_layer_objects(l);
+        storage store{.size = fs::file_size(paths.squashfs), .digest = *sqfs};
+        auto lo = format::make_layer_objects(cfg, store);
         if (!lo) {
             report.failed++;
             report.errors.push_back(fmt::format("{}: {}", label, lo.error()));
             continue;
         }
-        l.manifest = format::layer_descriptor(lo->manifest.digest,
-                                              lo->manifest.size());
+        const auto l = layer::make(
+            cfg, std::move(store),
+            format::layer_descriptor(lo->manifest.digest, lo->manifest.size()));
         auto img = raise_layer(l, std::nullopt, false);
         img->kind = uenv::image_kind::image;
         img->config.meta["system"] = r.system;

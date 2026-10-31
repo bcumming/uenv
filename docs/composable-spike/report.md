@@ -25,8 +25,8 @@ These items are open:
    slow writers and a check of the configs against the label, which the
    spike has. It also needs compaction, which it does not have: the history
    grows with no limit (C1 to C6).
-2. **Two rules are missing from the design** (M9 and M10). The spike chose
-   a rule for each.
+2. **One rule is missing from the design** (M10). The spike chose a
+   rule.
 3. **Two parts are not tested:** the site rules for referrers end to end
    (D3), and the old test suites, which test v1 (T2).
 4. **Three registry observations** (R1 to R3) are evidence for the design,
@@ -96,10 +96,10 @@ design sections and their tests.
 
 | part        | file                                | cases | what it uses                       |
 | ----------- | ----------------------------------- | ----- | ---------------------------------- |
-| model       | `test/unit/v2_model.cpp`            | 45    | memory only                        |
+| model       | `test/unit/v2_model.cpp`            | 46    | memory only                        |
 | repository  | `test/unit/v2_store.cpp`            | 19    | temporary repositories, `fork`     |
 | registry    | `test/unit/v2_registry.cpp`         | 19    | a zot that the tests start         |
-| end to end  | `test/integration/composable.bats`  | 33    | the CLI, real mounts, zot          |
+| end to end  | `test/integration/composable.bats`  | 34    | the CLI, real mounts, zot          |
 
 ### What each part checks
 
@@ -137,8 +137,8 @@ design sections and their tests.
 
 | run                                                   | result                                          |
 | ----------------------------------------------------- | ----------------------------------------------- |
-| `build-v2/test/unit` (all, old and new)               | 5072 assertions pass                            |
-| `build-v2/test/bats test/composable.bats`             | 33 of 33 pass, with real mounts and zot         |
+| `build-v2/test/unit` (all, old and new)               | 5101 assertions pass                            |
+| `build-v2/test/bats test/composable.bats`             | 34 of 34 pass, with real mounts and zot         |
 | new unit tests with AddressSanitizer                  | all pass, no ASan error                         |
 | registry tests on distribution `registry:2`           | 18 of 23 pass (see R3 in section 4)             |
 | Slurm plugin                                          | builds (`build-slurm`). Not run: no cluster     |
@@ -199,18 +199,30 @@ Each entry gives the design section, what happened, and the evidence.
 
 ### Rules that the design does not give (1-composition)
 
-The spike chose a rule for each. The design must state a rule.
+The spike chose a rule. The design must state a rule.
 
 | id  | section                         | status     |
 | --- | ------------------------------- | ---------- |
-| M9  | "Rules" of mount points         | spike rule |
 | M10 | "A check for absolute paths"    | spike rule |
 
-- **M9. A mount point with `,` or `:`** cannot go into `UENV_MOUNT_LIST`. The
-  spike refuses it.
-- **M10. "Contains its build mount point"** needs a rule for a prefix:
-  `/a/tools` is in `/a/tools/bin`, but not in `/a/tools2`. The spike requires
-  the end of the value, or a character that cannot continue a file name.
+- **M10. When does a value "contain" the build mount point?** A
+  relocatable layer can move to a different mount point, so its views must
+  refer to its root with `@uenv-root@`. The design ("A check for absolute
+  paths") says that the build and `compose` stop with an error if a view of
+  a relocatable layer contains its build mount point. For example, the layer
+  `tools` with the build mount point `/user-environment/tools` and the view
+  value `/user-environment/tools/bin` works only at that mount point. The
+  design does not say what "contains" means for a value. A plain substring
+  test is wrong: `/user-environment/tools2/bin` contains the text
+  `/user-environment/tools`, but it is a different directory. The spike
+  counts a match only if the text after it is the end of the value, or a
+  character that cannot continue a file name: `/user-environment/tools`,
+  `.../tools/bin` and `.../tools:/x` match, and `.../tools2`, `.../tools-1.0`
+  and `.../tools.cfg` do not. The same test gives the warning of compose for
+  the old path of a moved layer. The spike rule does not check the text
+  before the match: `/opt/user-environment/tools/bin` matches, but it is not
+  in the layer. The rule must also require the start of the value, or a
+  character that cannot be part of a path, before the match.
 
 ### The catalogue (5, a choice of the spike)
 
@@ -291,8 +303,11 @@ These are evidence for the design, not defects.
    configs against the label (C4). It also needs compaction, for example a
    snapshot event that holds the state, so that a first fill starts at the
    newest snapshot (C6). The spike did not test compaction.
-2. **1-composition:** a rule for M9 and for M10. The rules of the spike are
-   a good start.
+2. **1-composition, "A check for absolute paths":** a rule for M10. A value
+   contains the build mount point if the mount point is a whole path in the
+   value: the text before it is the start of the value or a character that
+   cannot be part of a path, and the text after it is the end of the value,
+   `/`, or a character that cannot continue a file name.
 
 ## 6. What the spike does not cover
 

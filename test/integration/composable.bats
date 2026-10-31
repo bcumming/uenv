@@ -189,6 +189,27 @@ function json_field() {
     assert_output --partial "use @uenv-root@"
 }
 
+@test "1/mount points: a mount point that UENV_MOUNT_LIST cannot hold is refused" {
+    # the setuid helper parses UENV_MOUNT_LIST: uenv refuses the mount point
+    # when it reads the config, not when it mounts
+    sed 's|"mount": "/user-environment/tools"|"mount": "/user env/tools"|' \
+        "$FIX/reltools.json" > "$TMP/space.json"
+    run uenv $R image add +space/1.0:v1 "$FIX/reltools.squashfs" --config "$TMP/space.json"
+    assert_failure
+    assert_output --partial "the mount point '/user env/tools' is not valid"
+    # the command line, and a compose file
+    add_fixtures
+    run uenv $R run +reltools:/opt/a+b -- true
+    assert_failure
+    cat > "$TMP/c.json" <<'EOF'
+{"name": "x", "version": "1.0", "release": "v1", "meta": {}, "views": {},
+ "layers": [{"from": "+reltools", "mount": "/opt/tools:2"}]}
+EOF
+    run uenv $R image compose "$TMP/c.json"
+    assert_failure
+    assert_output --partial "not valid"
+}
+
 @test "1/concretisation: run an image with a view" {
     require_mount
     add_fixtures

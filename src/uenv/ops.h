@@ -38,7 +38,7 @@ struct item_spec {
     std::optional<std::string> alias;
     std::optional<label_query> query;
     std::optional<std::filesystem::path> file;
-    std::optional<std::string> mount;
+    std::optional<mount_point> mount;
 };
 util::expected<std::vector<item_spec>, std::string>
 parse_item_list(const std::string& text, const label_keys& keys,
@@ -53,14 +53,14 @@ struct v1_label {
     std::optional<std::string> uarch;
 };
 // make a layer config from the meta/env.json of a v1 image
-format::layer_config make_layer_config(const uenv::meta& m,
-                                       const std::optional<v1_label>& label);
+util::expected<layer_config, std::string>
+make_layer_config(const uenv::meta& m, const std::optional<v1_label>& label);
 } // namespace v1
 
 // a squashfs file that a user starts or inspects: in memory only
 util::expected<composed_image, std::string>
 raise_from_squashfs(const std::filesystem::path& sqfs,
-                    std::optional<std::string> mount);
+                    std::optional<mount_point> mount);
 
 // the layer config of a squashfs file, from its meta/env.json
 util::expected<uenv::meta, std::string>
@@ -71,7 +71,7 @@ read_squashfs_meta(const std::filesystem::path& sqfs);
 // with image_meta added to the meta of the layer.
 util::expected<object_record, std::string>
 add_squashfs(store& s, const std::filesystem::path& sqfs,
-             const format::layer_config& cfg,
+             const layer_config& cfg,
              const std::map<std::string, std::string>& image_meta,
              bool as_layer,
              std::function<void(std::uint64_t, std::uint64_t)> progress = {});

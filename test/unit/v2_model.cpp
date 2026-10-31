@@ -239,8 +239,8 @@ TEST_CASE("1/views: a relocatable layer must not contain its mount point",
 
 namespace {
 std::vector<uenv::named_layer> my_env_layers() {
-    return {{"prgenv-gnu", "/user-environment", prgenv()},
-            {"tools", "/user-environment/tools", tools()}};
+    return {{"prgenv-gnu", mp("/user-environment"), prgenv()},
+            {"tools", mp("/user-environment/tools"), tools()}};
 }
 std::map<std::string, uenv::image_view> my_env_views() {
     return {{"dev",
@@ -272,7 +272,7 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     }
     SECTION("two layers with the same mount point") {
         auto ls = my_env_layers();
-        ls[1].mount = "/user-environment";
+        ls[1].mount = mp("/user-environment");
         auto r = uenv::make_composed_image(std::nullopt, my_env_config(), ls,
                                            {}, std::nullopt);
         REQUIRE(!r);
@@ -280,7 +280,7 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     }
     SECTION("a layer that is not relocatable, at a different mount point") {
         auto ls = my_env_layers();
-        ls[0].mount = "/opt/pe";
+        ls[0].mount = mp("/opt/pe");
         auto r = uenv::make_composed_image(std::nullopt, my_env_config(), ls,
                                            {}, std::nullopt);
         REQUIRE(!r);
@@ -288,7 +288,7 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     }
     SECTION("a relocatable layer can move") {
         auto ls = my_env_layers();
-        ls[1].mount = "/opt/tools";
+        ls[1].mount = mp("/opt/tools");
         REQUIRE(uenv::make_composed_image(std::nullopt, my_env_config(), ls,
                                           {}, std::nullopt));
     }
@@ -314,12 +314,34 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
                                            "nope");
         REQUIRE(!r);
     }
-    SECTION("a mount point with a variable") {
-        auto ls = my_env_layers();
-        ls[1].mount = "/scratch/$USER/tools";
-        REQUIRE(!uenv::make_composed_image(std::nullopt, my_env_config(), ls,
-                                           {}, std::nullopt));
+}
+
+TEST_CASE("1/mount points: the form that UENV_MOUNT_LIST can hold", "[model]") {
+    using uenv::mount_point;
+    for (auto ok : {"/", "/user-environment", "/user-environment/tools",
+                    "/opt/a_b-1.2"}) {
+        INFO(ok);
+        REQUIRE(mount_point::parse(ok));
+        REQUIRE(mount_point::parse(ok)->string() == ok);
     }
+    for (auto bad : {"", "user-environment", "./tools", "/a b", "/a,b", "/a:b",
+                     "/a/", "/a//b", "/a/./b", "/a/../b", "/scratch/$USER",
+                     "/@uenv-root@", "/a=b", "/a+b", "/a@b"}) {
+        INFO(bad);
+        REQUIRE(!mount_point::parse(bad));
+    }
+    // the limits of the setuid helper
+    REQUIRE(!mount_point::parse("/" + std::string(300, 'a')));
+    // a nested mount point
+    auto pe = mp("/user-environment");
+    auto tools = mp("/user-environment/tools");
+    REQUIRE(tools.is_inside(pe));
+    REQUIRE(!pe.is_inside(tools));
+    REQUIRE(!mp("/user-environment2").is_inside(pe));
+    REQUIRE(tools.relative_to(pe) == "tools");
+    REQUIRE(tools.is_inside(mp("/")));
+    // the sort order is the byte order of the text
+    REQUIRE(mp("/a-b") < mp("/a/b"));
 }
 
 TEST_CASE("1/order of layers: the order has no meaning", "[model]") {
@@ -327,7 +349,7 @@ TEST_CASE("1/order of layers: the order has no meaning", "[model]") {
     auto extra = make_layer("extra", "/user-tools", true,
                             {{"x", set_value("X", "@uenv-root@")}}, "x");
     std::vector<uenv::named_layer> layers = my_env_layers();
-    layers.push_back({"extra", "/user-tools", extra});
+    layers.push_back({"extra", mp("/user-tools"), extra});
     auto views = my_env_views();
     views["dev"].include.push_back(ref("extra:x"));
 
@@ -358,7 +380,7 @@ TEST_CASE("1/order of layers: the order has no meaning", "[model]") {
         auto env_str = fmt::format("{}", fmt::join(vars, ";"));
         std::vector<std::string> mounts;
         for (auto& [f, m] : c->mounts) {
-            mounts.push_back(m);
+            mounts.push_back(m.string());
         }
         if (!first_digest) {
             first_digest = d;
@@ -380,7 +402,7 @@ TEST_CASE("1/order of layers: the order has no meaning", "[model]") {
 TEST_CASE("2/index entries: a layer can occur two times in one image",
           "[model]") {
     auto t = tools();
-    std::vector<uenv::named_layer> ls{{"a", "/opt/a", t}, {"b", "/opt/b", t}};
+    std::vector<uenv::named_layer> ls{{"a", mp("/opt/a"), t}, {"b", mp("/opt/b"), t}};
     auto img = uenv::make_composed_image(
         std::nullopt, my_env_config(), ls,
         {{"both", {.include = refs({"a:tools", "b:tools"})}}}, "both");
@@ -422,9 +444,9 @@ TEST_CASE("1/raise: the raise of a layer", "[model]") {
 
 TEST_CASE("1/raise: a different mount point is an input to the raise",
           "[model]") {
-    auto img = uenv::raise_layer(tools(), "/opt/tools", false);
+    auto img = uenv::raise_layer(tools(), mp("/opt/tools"), false);
     REQUIRE(img);
-    REQUIRE(img->layers[0].mount == "/opt/tools");
+    REQUIRE(img->layers[0].mount == mp("/opt/tools"));
     auto c = uenv::concretise(*img, {});
     envvars::state env;
     uenv::apply_patches(env, c->patches);
@@ -433,10 +455,10 @@ TEST_CASE("1/raise: a different mount point is an input to the raise",
 
 TEST_CASE("1/raise: --force mounts a layer that is not relocatable",
           "[model]") {
-    REQUIRE(!uenv::raise_layer(prgenv(), "/opt/pe", false));
-    auto img = uenv::raise_layer(prgenv(), "/opt/pe", true);
+    REQUIRE(!uenv::raise_layer(prgenv(), mp("/opt/pe"), false));
+    auto img = uenv::raise_layer(prgenv(), mp("/opt/pe"), true);
     REQUIRE(img);
-    REQUIRE(img->layers[0].mount == "/opt/pe");
+    REQUIRE(img->layers[0].mount == mp("/opt/pe"));
 }
 
 //
@@ -539,7 +561,7 @@ TEST_CASE("1/runtime merge: an alias renames the include of each view",
           "[model]") {
     std::vector<uenv::runtime_merge_item> items{
         {.alias = "pe", .image = image_of(prgenv())},
-        {.alias = "t", .mount = "/opt/t", .image = image_of(tools()),
+        {.alias = "t", .mount = mp("/opt/t"), .image = image_of(tools()),
          .movable = true}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
@@ -583,12 +605,12 @@ TEST_CASE("1/runtime merge: an image view of an item is not a layer view",
 TEST_CASE("1/runtime merge: only a layer can move", "[model]") {
     std::vector<uenv::runtime_merge_item> items{
         {.image = image_of(prgenv())},
-        {.mount = "/opt/t", .image = image_of(tools()), .movable = false}};
+        {.mount = mp("/opt/t"), .image = image_of(tools()), .movable = false}};
     auto r = uenv::runtime_merge(items);
     REQUIRE(!r);
     REQUIRE(r.error().find("only a layer") != std::string::npos);
     // an image with more than one layer cannot move
-    r = uenv::runtime_merge({{.mount = "/opt/x", .image = my_env()},
+    r = uenv::runtime_merge({{.mount = mp("/opt/x"), .image = my_env()},
                              {.image = image_of(make_layer("x", "/x", false, {}))}});
     REQUIRE(!r);
     REQUIRE(r.error().find("cannot move") != std::string::npos);
@@ -625,7 +647,7 @@ TEST_CASE("1/runtime merge: a clash of layer aliases renames the later layer",
     // the layer tools of my-env, and the layer tools moved to /opt/tools
     std::vector<uenv::runtime_merge_item> items{
         {.image = my_env()},
-        {.mount = "/opt/tools", .image = image_of(tools()), .movable = true}};
+        {.mount = mp("/opt/tools"), .image = image_of(tools()), .movable = true}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
     REQUIRE(aliases_of(*img) ==
@@ -789,7 +811,7 @@ TEST_CASE("1/load more than one view: in order", "[env]") {
 
 TEST_CASE("1/the mount point in a layer view", "[env]") {
     auto p = set_value("X", "-DMOUNT=@uenv-root@\t-I@uenv-root@/include");
-    auto r = uenv::replace_root(p, "/opt/t");
+    auto r = uenv::replace_root(p, mp("/opt/t"));
     REQUIRE(r.scalars().at("X").value == "-DMOUNT=/opt/t\t-I/opt/t/include");
 }
 

@@ -190,7 +190,7 @@ reg::address addr(env_t& e, const std::string& text,
 
 uenv::object_record add_image(uenv::store& s, uenv::layer l,
                               std::map<std::string, std::string> meta = {}) {
-    return *uenv::add_squashfs(s, fake_sqfs(l.config.name + l.mount),
+    return *uenv::add_squashfs(s, fake_sqfs(l.config.name + l.mount.string()),
                                format::layer_config_of(l), meta, false);
 }
 

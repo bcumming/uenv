@@ -207,50 +207,52 @@ int image_add(const add_args& args, const global_settings& settings) {
         return 1;
     }
     const fs::path sqfs = fs::absolute(args.squashfs);
-    format::layer_config cfg;
-    if (args.config) {
-        auto body = util::read_file(*args.config);
-        if (!body) {
-            term::error("{}", body.error());
-            return 1;
+    // the layer config: from the file that the user gives, else from the
+    // meta/env.json of the squashfs
+    auto cfg = [&]() -> util::expected<layer_config, std::string> {
+        if (args.config) {
+            auto body = util::read_file(*args.config);
+            if (!body) {
+                return util::unexpected{body.error()};
+            }
+            // the label gives the fields that the file does not give
+            auto j = json::parse(*body, nullptr, false);
+            if (j.is_discarded()) {
+                return util::unexpected{
+                    fmt::format("{} is not valid JSON", *args.config)};
+            }
+            j["name"] = *label->name;
+            j["version"] = *label->version;
+            j["release"] = *label->tag;
+            if (!j.contains("meta")) {
+                j["meta"] = json::object();
+            }
+            if (label->uarch) {
+                j["meta"]["uarch"] = *label->uarch;
+            }
+            return format::parse_layer_config(j.dump());
         }
-        // the label gives the fields that the file does not give
-        auto j = json::parse(*body, nullptr, false);
-        if (j.is_discarded()) {
-            term::error("{} is not valid JSON", *args.config);
-            return 1;
-        }
-        j["name"] = *label->name;
-        j["version"] = *label->version;
-        j["release"] = *label->tag;
-        if (!j.contains("meta")) {
-            j["meta"] = json::object();
-        }
-        if (label->uarch) {
-            j["meta"]["uarch"] = *label->uarch;
-        }
-        auto c = format::parse_layer_config(j.dump());
-        if (!c) {
-            term::error("{}", c.error());
-            return 1;
-        }
-        cfg = *c;
-    } else {
         auto m = read_squashfs_meta(sqfs);
         if (!m) {
-            term::error("{}", m.error());
-            return 1;
+            return util::unexpected{m.error()};
         }
-        cfg = v1::make_layer_config(
+        auto c = v1::make_layer_config(
             *m, v1::v1_label{*label->version, *label->tag, label->system,
                              label->uarch});
-        cfg.shared.name = *label->name;
+        if (c) {
+            c->shared.name = *label->name;
+        }
+        return c;
+    }();
+    if (!cfg) {
+        term::error("{}", cfg.error());
+        return 1;
     }
     std::map<std::string, std::string> image_meta;
     if (label->system) {
         image_meta[settings.config.label.at] = *label->system;
     }
-    auto r = add_squashfs(*s, sqfs, cfg, image_meta, as_layer);
+    auto r = add_squashfs(*s, sqfs, *cfg, image_meta, as_layer);
     if (!r) {
         term::error("{}", r.error());
         return 1;
@@ -339,8 +341,8 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         }
         layers.push_back(
             {{"alias", l.alias},
-             {"mount", l.mount},
-             {"build_mount", l.layer.mount},
+             {"mount", l.mount.string()},
+             {"build_mount", l.layer.mount.string()},
              {"relocatable", l.layer.relocatable},
              {"label", label_of(l.layer.config)},
              {"meta", l.layer.config.meta},

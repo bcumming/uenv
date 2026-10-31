@@ -142,7 +142,7 @@ prepare_session(const std::string& uenv_arg,
             }
         }
         auto& cfg = l.layer.config;
-        nlohmann::json e{{"mount", l.mount},
+        nlohmann::json e{{"mount", l.mount.string()},
                          {"sqfs", l.layer.store.file->string()},
                          {"views", lviews},
                          {"name", l.alias}};

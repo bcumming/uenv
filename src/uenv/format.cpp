@@ -347,7 +347,7 @@ env_from_json(const json& j, std::vector<std::string>* warnings) {
 json to_json(const layer_config& c) {
     json j = json::object();
     write_shared(j, c.shared);
-    j["mount"] = c.mount;
+    j["mount"] = c.mount.string();
     j["relocatable"] = c.relocatable;
     j["views"] = json::object();
     for (auto& [name, v] : c.views) {
@@ -416,20 +416,18 @@ util::expected<layer_config, error> parse_layer_config(std::string_view body) {
     if (!j) {
         return unexpected{j.error()};
     }
-    layer_config c;
     auto shared = parse_shared(*j, what);
     if (!shared) {
         return unexpected{shared.error()};
     }
-    c.shared = *shared;
     auto mount = req_string(*j, "mount", what);
     if (!mount) {
         return unexpected{mount.error()};
     }
-    if (auto r = validate_mount_point(*mount); !r) {
-        return unexpected{fmt::format("{}: {}", what, r.error())};
+    auto mp = mount_point::parse(*mount);
+    if (!mp) {
+        return unexpected{fmt::format("{}: {}", what, mp.error())};
     }
-    c.mount = *mount;
     auto rel = j->find("relocatable");
     if (rel == j->end()) {
         return unexpected{
@@ -438,12 +436,13 @@ util::expected<layer_config, error> parse_layer_config(std::string_view body) {
     if (!rel->is_boolean()) {
         return unexpected{fmt::format("{}: 'relocatable' must be a bool", what)};
     }
-    c.relocatable = rel->get<bool>();
+    const bool relocatable = rel->get<bool>();
     auto views = j->find("views");
     if (views == j->end() || !views->is_object()) {
         return unexpected{
             fmt::format("{}: the required field 'views' must be an object", what)};
     }
+    std::map<std::string, layer_view> layer_views;
     for (auto it = views->begin(); it != views->end(); ++it) {
         if (!it->is_object()) {
             return unexpected{
@@ -468,16 +467,19 @@ util::expected<layer_config, error> parse_layer_config(std::string_view body) {
             return unexpected{fmt::format("{}: the view name '{}' is not valid: {}",
                                           what, it.key(), vname.error().message())};
         }
-        c.views[*vname] = std::move(v);
+        layer_views[*vname] = std::move(v);
     }
     auto dv = parse_default_view(*j, what, [&](const std::string& n) {
-        return c.views.contains(n);
+        return layer_views.contains(n);
     });
     if (!dv) {
         return unexpected{dv.error()};
     }
-    c.default_view = *dv;
-    return c;
+    return layer_config{.shared = std::move(*shared),
+                        .mount = std::move(*mp),
+                        .relocatable = relocatable,
+                        .views = std::move(layer_views),
+                        .default_view = std::move(*dv)};
 }
 
 util::expected<image_config, error> parse_image_config(std::string_view body) {
@@ -591,7 +593,7 @@ util::expected<void, error> check_relocatable(const layer_config& c) {
         return {};
     }
     auto contains_mount = [&](const std::string& s) {
-        return mentions_path(s, c.mount);
+        return mentions_path(s, c.mount.string());
     };
     for (auto& [name, v] : c.views) {
         for (auto& [var, s] : v.env.scalars()) {
@@ -669,7 +671,8 @@ util::expected<blob, error> make_index(const blob& wrapper,
         auto d = descriptor_json(oci::media_type_manifest, e.manifest.digest,
                                  e.manifest.size);
         d["artifactType"] = at_layer;
-        d["annotations"] = json{{ann_alias, e.alias}, {ann_mount, e.mount}};
+        d["annotations"] =
+            json{{ann_alias, e.alias}, {ann_mount, e.mount.string()}};
         manifests.push_back(d);
     }
     json j{{"schemaVersion", 2},
@@ -853,7 +856,11 @@ util::expected<image_index, error> parse_index(std::string_view body) {
         if (!mount) {
             return unexpected{mount.error()};
         }
-        layer_entries.push_back({*d, *alias, *mount});
+        auto mp = mount_point::parse(*mount);
+        if (!mp) {
+            return unexpected{fmt::format("{}: entry {}: {}", what, i, mp.error())};
+        }
+        layer_entries.push_back({*d, *alias, *mp});
     }
     if (layer_entries.empty()) {
         return unexpected{fmt::format("{}: the index has no layers", what)};
@@ -928,19 +935,12 @@ util::expected<layer, error> load_layer(const oci::descriptor& desc,
         return unexpected{
             fmt::format("{}: {}", desc.digest.string(), c.error())};
     }
-    layer l;
-    l.manifest = layer_descriptor(desc.digest, body->size());
-    l.store.size = m->squashfs.size;
-    l.store.digest = m->squashfs.digest;
+    storage store{.size = m->squashfs.size, .digest = m->squashfs.digest};
     if (locate) {
-        l.store.file = locate(m->squashfs.digest);
+        store.file = locate(m->squashfs.digest);
     }
-    l.config = c->shared;
-    l.mount = c->mount;
-    l.relocatable = c->relocatable;
-    l.views = c->views;
-    l.default_view = c->default_view;
-    return l;
+    return layer::make(std::move(*c), std::move(store),
+                       layer_descriptor(desc.digest, body->size()));
 }
 
 util::expected<composed_image, error>
@@ -1071,20 +1071,25 @@ layer_config layer_config_of(const layer& l) {
                         .default_view = l.default_view};
 }
 
-util::expected<layer_objects, error> make_layer_objects(const layer& l) {
-    if (!l.store.digest) {
+util::expected<layer_objects, error> make_layer_objects(const layer_config& c,
+                                                        const storage& store) {
+    if (!store.digest) {
         return unexpected{error{"the squashfs of the layer has no digest"}};
     }
-    auto cfg_bytes = canonical(to_json(layer_config_of(l)));
+    auto cfg_bytes = canonical(to_json(c));
     if (!cfg_bytes) {
         return unexpected{cfg_bytes.error()};
     }
     auto cfg = make_blob(*cfg_bytes);
-    auto manifest = make_layer_manifest(cfg, *l.store.digest, l.store.size);
+    auto manifest = make_layer_manifest(cfg, *store.digest, store.size);
     if (!manifest) {
         return unexpected{manifest.error()};
     }
     return layer_objects{cfg, *manifest};
+}
+
+util::expected<layer_objects, error> make_layer_objects(const layer& l) {
+    return make_layer_objects(layer_config_of(l), l.store);
 }
 
 std::optional<oci::digest> image_digest(const composed_image& img) {

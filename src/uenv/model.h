@@ -14,6 +14,7 @@
 
 #include <oci/digest.h>
 #include <oci/types.h>
+#include <uenv/mount_point.h>
 #include <uenv/view.h>
 #include <util/envvars.h>
 #include <util/expected.h>
@@ -51,7 +52,22 @@ struct layer_view {
     envvars::patch env;
 };
 
+// the layer config: what the layer is, where to mount it, and how to use it
+struct layer_config {
+    config shared;
+    mount_point mount;
+    bool relocatable = false;
+    std::map<std::string, layer_view> views;
+    std::optional<std::string> default_view;
+};
+
 struct layer {
+    // make a layer from its parts: the layer config, the file system image,
+    // and the descriptor of the layer manifest (absent for a squashfs file
+    // that is started directly)
+    static layer make(layer_config cfg, storage store,
+                      std::optional<oci::descriptor> manifest = std::nullopt);
+
     // the descriptor of the layer manifest, as an index entry refers to it.
     // Its digest is the identity of the layer. Absent for a squashfs file.
     std::optional<oci::descriptor> manifest;
@@ -59,7 +75,8 @@ struct layer {
     storage store;
 
     uenv::config config;
-    std::string mount;
+    // the build mount point
+    mount_point mount;
     bool relocatable = false;
     std::map<std::string, layer_view> views;
     std::optional<std::string> default_view;
@@ -75,7 +92,7 @@ struct layer {
 
 struct named_layer {
     std::string alias;
-    std::string mount;
+    mount_point mount;
     struct layer layer;
 };
 
@@ -116,7 +133,7 @@ struct composed_image {
 // the result of concretise: never stored, never an input to compose
 struct concrete_image {
     // (file system image, mount point), sorted by mount point
-    std::vector<std::pair<std::filesystem::path, std::string>> mounts;
+    std::vector<std::pair<std::filesystem::path, mount_point>> mounts;
     // applied in order, one at a time
     std::vector<envvars::patch> patches;
     // the views that the patches load, in order
@@ -133,20 +150,17 @@ make_composed_image(std::optional<oci::digest> digest, config cfg,
                     std::map<std::string, image_view> views,
                     std::optional<std::string> default_view);
 
-// check a mount point: an absolute path with no variables
-util::expected<void, model_error> validate_mount_point(const std::string& m);
-
 // Raise a layer: a composed_image with one layer, and an image view for each
 // layer view. `mount` is the mount point at which to use the layer.
 util::expected<composed_image, model_error>
-raise_layer(const layer& l, std::optional<std::string> mount, bool force,
+raise_layer(const layer& l, std::optional<mount_point> mount, bool force,
             std::optional<std::string> alias = std::nullopt);
 
 // one item of the list given to uenv run/start or srun --uenv:
 // [alias=]label[:mount]
 struct runtime_merge_item {
     std::optional<std::string> alias;
-    std::optional<std::string> mount;
+    std::optional<mount_point> mount;
     // an image, a raised layer, or a raised squashfs file
     composed_image image;
     // true if the item is a layer or a squashfs file (it can move)
@@ -162,7 +176,7 @@ util::expected<composed_image, model_error>
 runtime_merge(std::vector<runtime_merge_item> items);
 
 // Replace each @uenv-root@ in a patch with the mount point
-envvars::patch replace_root(const envvars::patch& p, const std::string& mount);
+envvars::patch replace_root(const envvars::patch& p, const mount_point& mount);
 
 // Concretise: the mount list, and the list of patches for the views.
 // views: the views that the user gives. If there are none, concretise loads

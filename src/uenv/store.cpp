@@ -813,17 +813,17 @@ object_record record_of(const composed_image& img, std::uint64_t size) {
     r.size = size;
     for (auto& l : img.layers) {
         r.layers.push_back(layer_ref{.alias = l.alias,
-                                     .mount = l.mount,
+                                     .mount = l.mount.string(),
                                      .digest = *l.layer.digest(),
                                      .cfg = l.layer.config,
-                                     .build_mount = l.layer.mount,
+                                     .build_mount = l.layer.mount.string(),
                                      .relocatable = l.layer.relocatable,
                                      .squashfs = *l.layer.store.digest,
                                      .squashfs_size = l.layer.store.size});
     }
     if (img.kind == uenv::image_kind::layer) {
         auto& l = img.layers.front().layer;
-        r.mount = l.mount;
+        r.mount = l.mount.string();
         r.relocatable = l.relocatable;
         r.squashfs = l.store.digest;
     }

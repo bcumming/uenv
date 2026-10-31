@@ -12,6 +12,7 @@
 #include <oci/digest.h>
 #include <oci/types.h>
 #include <uenv/model.h>
+#include <uenv/mount_point.h>
 #include <util/expected.h>
 
 namespace uenv::format {
@@ -70,14 +71,6 @@ util::expected<envvars::patch, error>
 env_from_json(const nlohmann::json& j,
               std::vector<std::string>* warnings = nullptr);
 
-struct layer_config {
-    config shared;
-    std::string mount;
-    bool relocatable = false;
-    std::map<std::string, layer_view> views;
-    std::optional<std::string> default_view;
-};
-
 struct image_config {
     config shared;
     std::map<std::string, image_view> views;
@@ -114,7 +107,7 @@ struct wrapper_manifest {
 struct index_entry {
     oci::descriptor manifest;
     std::string alias;
-    std::string mount;
+    mount_point mount;
 };
 struct image_index {
     oci::descriptor wrapper;
@@ -177,6 +170,10 @@ struct layer_objects {
     blob manifest;
 };
 layer_config layer_config_of(const layer& l);
+// the layer config blob and the layer manifest of a layer config and a file
+// system image: the manifest gives the descriptor of the layer
+util::expected<layer_objects, error> make_layer_objects(const layer_config& c,
+                                                        const storage& store);
 util::expected<layer_objects, error> make_layer_objects(const layer& l);
 
 // the identity of the image that uenv would write for img

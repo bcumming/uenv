@@ -17,6 +17,11 @@
 
 namespace v2test {
 
+// a mount point from a literal that the test knows is valid
+inline uenv::mount_point mp(const std::string& s) {
+    return *uenv::mount_point::parse(s);
+}
+
 // "alias:view": a reference to a layer view
 inline uenv::layer_view_ref ref(const std::string& s) {
     return *uenv::parse_layer_view_ref(s);
@@ -66,22 +71,27 @@ inline uenv::layer make_layer(std::string name, std::string mount,
                               bool relocatable,
                               std::map<std::string, envvars::patch> views,
                               std::optional<std::string> default_view = {}) {
-    uenv::layer l;
-    l.config = {.name = name, .version = "1.0", .release = "v1",
-                .meta = {{"uarch", "zen2"}}};
-    l.mount = mount;
-    l.relocatable = relocatable;
+    std::map<std::string, uenv::layer_view> lviews;
     for (auto& [k, v] : views) {
-        l.views[k] = uenv::layer_view{.env = v};
+        lviews[k] = uenv::layer_view{.env = v};
     }
-    l.default_view = default_view;
-    l.store.size = 4096;
-    l.store.digest = oci::digest::sha256(util::sha256_string(name + mount));
-    l.store.file = "/blobs/" + name;
-    auto objs = uenv::format::make_layer_objects(l);
-    l.manifest = uenv::format::layer_descriptor(objs->manifest.digest,
-                                                objs->manifest.size());
-    return l;
+    uenv::layer_config cfg{.shared = {.name = name,
+                                      .version = "1.0",
+                                      .release = "v1",
+                                      .meta = {{"uarch", "zen2"}}},
+                           .mount = mp(mount),
+                           .relocatable = relocatable,
+                           .views = std::move(lviews),
+                           .default_view = default_view};
+    uenv::storage store{
+        .size = 4096,
+        .digest = oci::digest::sha256(util::sha256_string(name + mount)),
+        .file = "/blobs/" + name};
+    auto objs = uenv::format::make_layer_objects(cfg, store);
+    return uenv::layer::make(
+        std::move(cfg), std::move(store),
+        uenv::format::layer_descriptor(objs->manifest.digest,
+                                       objs->manifest.size()));
 }
 
 // prgenv-gnu: not relocatable, two views

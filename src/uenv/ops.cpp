@@ -100,7 +100,14 @@ parse_item_list(const std::string& text, const label_keys& keys,
             return unexpected{fmt::format("invalid item '{}': {}", item.text,
                                           desc.error().message())};
         }
-        item.mount = desc->mount();
+        if (auto m = desc->mount()) {
+            auto mp = mount_point::parse(*m);
+            if (!mp) {
+                return unexpected{
+                    fmt::format("invalid item '{}': {}", item.text, mp.error())};
+            }
+            item.mount = *mp;
+        }
         if (auto file = desc->filename()) {
             item.file = fs::absolute(*file);
         } else if (auto label = desc->label()) {
@@ -108,7 +115,7 @@ parse_item_list(const std::string& text, const label_keys& keys,
             auto label_text = rest;
             if (item.mount) {
                 label_text = label_text.substr(
-                    0, label_text.size() - item.mount->size() - 1);
+                    0, label_text.size() - item.mount->string().size() - 1);
             }
             auto q = parse_label_query((layer ? "+" : "") + label_text, keys,
                                        default_system);
@@ -127,26 +134,30 @@ parse_item_list(const std::string& text, const label_keys& keys,
 
 namespace v1 {
 
-format::layer_config make_layer_config(const uenv::meta& m,
-                                       const std::optional<v1_label>& label) {
-    format::layer_config c;
-    c.shared.name = m.name;
-    c.shared.description = m.description.value_or("");
+util::expected<layer_config, std::string>
+make_layer_config(const uenv::meta& m, const std::optional<v1_label>& label) {
+    auto mount = mount_point::parse(m.mount);
+    if (!mount) {
+        return unexpected{fmt::format("meta/env.json: {}", mount.error())};
+    }
+    config shared{.name = m.name, .description = m.description.value_or("")};
     if (label) {
-        c.shared.version = label->version;
-        c.shared.release = label->release;
+        shared.version = label->version;
+        shared.release = label->release;
         if (label->uarch) {
-            c.shared.meta["uarch"] = *label->uarch;
+            shared.meta["uarch"] = *label->uarch;
         }
     }
-    c.mount = m.mount;
-    c.relocatable = false;
+    std::map<std::string, layer_view> views;
     for (auto& [name, v] : m.views) {
-        c.views[name] =
+        views[name] =
             layer_view{.description = v.description, .env = v.environment};
     }
-    c.default_view = m.default_view;
-    return c;
+    return layer_config{.shared = std::move(shared),
+                        .mount = std::move(*mount),
+                        .relocatable = false,
+                        .views = std::move(views),
+                        .default_view = m.default_view};
 }
 
 } // namespace v1
@@ -171,42 +182,45 @@ read_squashfs_meta(const fs::path& sqfs) {
 }
 
 util::expected<composed_image, std::string>
-raise_from_squashfs(const fs::path& sqfs, std::optional<std::string> mount) {
+raise_from_squashfs(const fs::path& sqfs, std::optional<mount_point> mount) {
     std::error_code ec;
     if (!fs::is_regular_file(sqfs, ec)) {
         return unexpected{fmt::format("{} is not a file", sqfs.string())};
     }
-    format::layer_config cfg;
-    if (auto m = read_squashfs_meta(sqfs)) {
-        cfg = v1::make_layer_config(*m, std::nullopt);
-    } else {
+    // the layer config: from meta/env.json, else a layer with no views at
+    // the mount point that the user gives
+    auto cfg = [&]() -> util::expected<layer_config, std::string> {
+        auto m = read_squashfs_meta(sqfs);
+        if (m) {
+            auto c = v1::make_layer_config(*m, std::nullopt);
+            if (!c) {
+                return unexpected{
+                    fmt::format("{}: {}", sqfs.string(), c.error())};
+            }
+            return c;
+        }
         spdlog::warn("{}: the layer has no views", m.error());
-        cfg.shared.name = sqfs.stem().string();
         if (!mount) {
             return unexpected{fmt::format(
                 "{} has no meta/env.json: give the mount point, for example "
                 "{}:/user-environment",
                 sqfs.string(), sqfs.string())};
         }
-        cfg.mount = *mount;
+        return layer_config{.shared = {.name = sqfs.stem().string()},
+                            .mount = *mount};
+    }();
+    if (!cfg) {
+        return unexpected{cfg.error()};
     }
-    if (mount && *mount != cfg.mount) {
+    if (mount && *mount != cfg->mount) {
         spdlog::warn("{} was made for the mount point {}, and is mounted at {}",
-                     sqfs.string(), cfg.mount, *mount);
-        cfg.mount = *mount;
+                     sqfs.string(), cfg->mount, *mount);
+        cfg->mount = *mount;
     }
-    if (auto r = validate_mount_point(cfg.mount); !r) {
-        return unexpected{r.error()};
-    }
-    layer l;
-    l.store.size = fs::file_size(sqfs, ec);
-    l.store.file = sqfs;
-    l.config = cfg.shared;
-    l.mount = cfg.mount;
-    l.relocatable = false;
-    l.views = cfg.views;
-    l.default_view = cfg.default_view;
-    return raise_layer(l, std::nullopt, false);
+    // a squashfs file is not hashed: it has no digest and no layer manifest
+    storage store{.size = fs::file_size(sqfs, ec), .file = sqfs};
+    return raise_layer(layer::make(std::move(*cfg), std::move(store)),
+                       std::nullopt, false);
 }
 
 util::expected<object_record, std::string>
@@ -226,7 +240,7 @@ write_image(store& s, const composed_image& img) {
 }
 
 util::expected<object_record, std::string>
-add_squashfs(store& s, const fs::path& sqfs, const format::layer_config& cfg,
+add_squashfs(store& s, const fs::path& sqfs, const layer_config& cfg,
              const std::map<std::string, std::string>& image_meta,
              bool as_layer,
              std::function<void(std::uint64_t, std::uint64_t)> progress) {
@@ -246,15 +260,9 @@ add_squashfs(store& s, const fs::path& sqfs, const format::layer_config& cfg,
     }
     test_fault("add-after-squashfs");
     std::error_code ec;
-    layer l;
-    l.store.size = fs::file_size(s.blob_path(*sqfs_digest), ec);
-    l.store.digest = *sqfs_digest;
-    l.config = cfg.shared;
-    l.mount = cfg.mount;
-    l.relocatable = cfg.relocatable;
-    l.views = cfg.views;
-    l.default_view = cfg.default_view;
-    auto lo = format::make_layer_objects(l);
+    storage store{.size = fs::file_size(s.blob_path(*sqfs_digest), ec),
+                  .digest = *sqfs_digest};
+    auto lo = format::make_layer_objects(cfg, store);
     if (!lo) {
         return unexpected{lo.error()};
     }
@@ -263,8 +271,9 @@ add_squashfs(store& s, const fs::path& sqfs, const format::layer_config& cfg,
             return unexpected{r.error()};
         }
     }
-    l.manifest = format::layer_descriptor(lo->manifest.digest,
-                                          lo->manifest.size());
+    const auto l = layer::make(
+        cfg, std::move(store),
+        format::layer_descriptor(lo->manifest.digest, lo->manifest.size()));
     if (as_layer) {
         return s.record(lo->manifest.digest, true);
     }
@@ -327,15 +336,15 @@ util::expected<void, std::string> check_nested_mounts(const composed_image& img)
         const named_layer* parent = nullptr;
         for (std::size_t j = 0; j < i; ++j) {
             auto& p = img.layers[j];
-            if (child.mount.starts_with(p.mount + "/") &&
-                (!parent || p.mount.size() > parent->mount.size())) {
+            if (child.mount.is_inside(p.mount) &&
+                (!parent || p.mount.is_inside(parent->mount))) {
                 parent = &p;
             }
         }
         if (!parent || !parent->layer.store.file) {
             continue;
         }
-        auto rel = child.mount.substr(parent->mount.size() + 1);
+        auto rel = child.mount.relative_to(parent->mount);
         auto proc = util::run({"unsquashfs", "-l", "-d", "", "-no-progress",
                                parent->layer.store.file->string(), rel});
         if (!proc) {
@@ -385,7 +394,8 @@ std::vector<std::string> compose_warnings(const composed_image& img) {
             continue;
         }
         for (auto& [name, v] : img.views) {
-            for (auto& var : format::patch_mentions(v.env, l.layer.mount)) {
+            for (auto& var :
+                 format::patch_mentions(v.env, l.layer.mount.string())) {
                 out.push_back(fmt::format(
                     "the image view '{}' sets {} with the path {}, but the "
                     "layer '{}' is now at {}",
@@ -476,8 +486,19 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys,
             !r) {
             return unexpected{r.error()};
         }
+        auto mount = src->mount;
+        if (auto m = e.find("mount"); m != e.end()) {
+            auto mp = m->is_string() ? mount_point::parse(m->get<std::string>())
+                                     : util::unexpected{std::string{
+                                           "'mount' must be a string"}};
+            if (!mp) {
+                return unexpected{
+                    fmt::format("the compose file: {}", mp.error())};
+            }
+            mount = *mp;
+        }
         named_layer nl{.alias = e.value("alias", src->config.name),
-                       .mount = e.value("mount", src->mount),
+                       .mount = mount,
                        .layer = *src};
         layers.push_back(std::move(nl));
     }

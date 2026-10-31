@@ -137,6 +137,7 @@ lib_uenv_src = [
         'src/uenv/elastic.cpp',
         'src/uenv/format.cpp',
         'src/uenv/model.cpp',
+        'src/uenv/mount_point.cpp',
         'src/uenv/env.cpp',
         'src/uenv/join_context.cpp',
         'src/uenv/log.cpp',
