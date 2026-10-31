@@ -27,102 +27,164 @@ using util::unexpected;
 
 namespace {
 
-bool is_hex(std::string_view s) {
-    return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) {
+bool is_lower_hex(std::string_view s) {
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) {
         return std::isdigit(c) || (c >= 'a' && c <= 'f');
     });
+}
+
+// the id of an object: "sha256:<64 hex>", 64 hex, or 16 hex. Absent if the
+// text has none of these forms (it is a label).
+std::optional<util::expected<object_id, std::string>>
+parse_object_id(std::string_view text) {
+    if (text.starts_with("sha256:")) {
+        auto d = oci::digest::parse(text);
+        if (!d) {
+            return util::expected<object_id, std::string>{unexpected{
+                fmt::format("'{}' is not a valid digest", text)}};
+        }
+        return util::expected<object_id, std::string>{*d};
+    }
+    if (text.size() == 64 && is_lower_hex(text)) {
+        auto d = oci::digest::parse(fmt::format("sha256:{}", text));
+        if (!d) {
+            return util::expected<object_id, std::string>{
+                unexpected{fmt::format("'{}' is not a valid digest", text)}};
+        }
+        return util::expected<object_id, std::string>{*d};
+    }
+    if (text.size() == 16 && is_lower_hex(text)) {
+        auto id = util::uenv_id::parse(text);
+        if (!id) {
+            return util::expected<object_id, std::string>{unexpected{id.error()}};
+        }
+        return util::expected<object_id, std::string>{*id};
+    }
+    return std::nullopt;
 }
 
 } // namespace
 
 util::expected<label_query, std::string>
-parse_label_query(std::string text, const label_keys& keys,
-                  std::optional<std::string> default_system) {
-    label_query q;
-    if (!text.empty() && text[0] == '+') {
-        q.layer = true;
-        text = text.substr(1);
+query_of_label(bool layer, const uenv_label& label, const label_keys& keys,
+               std::optional<std::string> default_system) {
+    // the label parser gives names: each one parses
+    auto opt = [](const std::optional<std::string>& text, std::string_view what)
+        -> util::expected<std::optional<uenv::name>, std::string> {
+        if (!text) {
+            return std::optional<uenv::name>{};
+        }
+        auto n = uenv::name::parse(*text);
+        if (!n) {
+            return unexpected{fmt::format("the {} {}", what, n.error())};
+        }
+        return std::optional<uenv::name>{*n};
+    };
+    auto n = opt(label.name, "name");
+    auto version = opt(label.version, "version");
+    auto release = opt(label.tag, "release");
+    if (!n || !version || !release) {
+        return unexpected{!n ? n.error() : !version ? version.error()
+                                                    : release.error()};
     }
-    // an id or a digest
-    if (text.starts_with("sha256:") || (is_hex(text) && (text.size() == 16 ||
-                                                         text.size() == 64))) {
-        q.id = text;
-        return q;
-    }
-    auto label = parse_uenv_label(text);
-    if (!label) {
-        return unexpected{fmt::format("invalid label '{}': {}", text,
-                                      label.error().message())};
-    }
-    q.name = label->name;
-    q.version = label->version;
-    q.release = label->tag;
-    if (label->system && *label->system != "*") {
-        q.meta[keys.at] = *label->system;
-    } else if (!label->system && default_system) {
+    label_query q{.layer = layer, .name = *n, .version = *version,
+                  .release = *release};
+    // '@*' is each system
+    if (label.system && *label.system != "*") {
+        q.meta[keys.at] = *label.system;
+    } else if (!label.system && default_system && *default_system != "*") {
         q.meta[keys.at] = *default_system;
     }
-    if (label->uarch) {
-        q.meta[keys.percent] = *label->uarch;
+    if (label.uarch) {
+        q.meta[keys.percent] = *label.uarch;
     }
     return q;
+}
+
+util::expected<label_query, std::string>
+parse_label_query(std::string text, const label_keys& keys,
+                  std::optional<std::string> default_system) {
+    auto marked = parse_layer_marker(text);
+    const bool layer = marked.layer;
+    const std::string rest(marked.rest);
+    if (auto id = parse_object_id(rest)) {
+        if (!*id) {
+            return unexpected{id->error()};
+        }
+        return label_query{.layer = layer, .id = **id};
+    }
+    auto label = parse_uenv_label(rest);
+    if (!label) {
+        return unexpected{fmt::format("invalid label '{}': {}", rest,
+                                      label.error().message())};
+    }
+    return query_of_label(layer, *label, keys, std::move(default_system));
 }
 
 util::expected<std::vector<item_spec>, std::string>
 parse_item_list(const std::string& text, const label_keys& keys,
                 std::optional<std::string> default_system) {
+    auto parsed = parse_run_items(text);
+    if (!parsed) {
+        return unexpected{fmt::format("invalid list of uenv '{}': {}", text,
+                                      parsed.error().message())};
+    }
     std::vector<item_spec> items;
-    std::size_t start = 0;
-    while (start <= text.size()) {
-        auto end = text.find(',', start);
-        auto word = text.substr(start, end == std::string::npos
-                                           ? std::string::npos
-                                           : end - start);
-        start = end == std::string::npos ? text.size() + 1 : end + 1;
-        if (word.empty()) {
-            continue;
-        }
-        item_spec item{.text = word};
-        // [alias=]
-        if (auto eq = word.find('='); eq != std::string::npos) {
-            auto alias = name::parse(word.substr(0, eq));
+    for (auto& p : *parsed) {
+        const auto label = p.what.label();
+        const auto file = p.what.filename();
+        // for messages: the text of the item
+        std::string item_text = fmt::format(
+            "{}{}{}", p.alias ? *p.alias + "=" : "", p.layer ? "+" : "",
+            file ? *file : label ? label->name.value_or("") : "");
+        item_spec item{.text = item_text};
+        if (p.alias) {
+            auto alias = uenv::name::parse(*p.alias);
             if (!alias) {
                 return unexpected{fmt::format("invalid item '{}': the alias {}",
-                                              item.text, alias.error())};
+                                              item_text, alias.error())};
             }
             item.alias = *alias;
-            word = word.substr(eq + 1);
         }
-        bool layer = !word.empty() && word[0] == '+';
-        auto rest = layer ? word.substr(1) : word;
-        auto desc = parse_uenv_description(rest);
-        if (!desc) {
-            return unexpected{fmt::format("invalid item '{}': {}", item.text,
-                                          desc.error().message())};
-        }
-        if (auto m = desc->mount()) {
+        if (auto m = p.what.mount()) {
             auto mp = mount_point::parse(*m);
             if (!mp) {
                 return unexpected{
-                    fmt::format("invalid item '{}': {}", item.text, mp.error())};
+                    fmt::format("invalid item '{}': {}", item_text, mp.error())};
             }
             item.mount = *mp;
         }
-        if (auto file = desc->filename()) {
-            item.file = fs::absolute(*file);
-        } else if (auto label = desc->label()) {
-            // keep the text of the label: re-parse it as a query
-            auto label_text = rest;
-            if (item.mount) {
-                label_text = label_text.substr(
-                    0, label_text.size() - item.mount->string().size() - 1);
+        if (file) {
+            auto f = parse_file_path(*file);
+            if (!f) {
+                return unexpected{
+                    fmt::format("invalid item '{}': {}", item_text, f.error())};
             }
-            auto q = parse_label_query((layer ? "+" : "") + label_text, keys,
-                                       default_system);
-            if (!q) {
-                return unexpected{q.error()};
+            item.file = *f;
+        } else if (label) {
+            // an id is a label of one name: 16 or 64 hex, or a digest
+            std::optional<util::expected<object_id, std::string>> id;
+            if (label->name && !label->version && !label->system &&
+                !label->uarch) {
+                // the label parser reads "sha256:<hex>" as a name and a tag
+                id = label->tag ? (*label->name == "sha256"
+                                       ? parse_object_id("sha256:" + *label->tag)
+                                       : std::nullopt)
+                                : parse_object_id(*label->name);
             }
-            item.query = *q;
+            if (id) {
+                if (!*id) {
+                    return unexpected{id->error()};
+                }
+                item.query = label_query{.layer = p.layer, .id = **id};
+            } else {
+                auto q = query_of_label(p.layer, *label, keys, default_system);
+                if (!q) {
+                    return unexpected{fmt::format("invalid item '{}': {}",
+                                                  item_text, q.error())};
+                }
+                item.query = std::move(*q);
+            }
         }
         items.push_back(std::move(item));
     }

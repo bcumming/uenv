@@ -542,15 +542,15 @@ object_db::query(const label_query& q) {
     std::vector<value> params;
     if (q.name) {
         sql += " AND o.name = ?";
-        params.push_back(*q.name);
+        params.push_back(q.name->string());
     }
     if (q.version) {
         sql += " AND o.version = ?";
-        params.push_back(*q.version);
+        params.push_back(q.version->string());
     }
     if (q.release) {
         sql += " AND o.release = ?";
-        params.push_back(*q.release);
+        params.push_back(q.release->string());
     }
     for (auto& [k, v] : q.meta) {
         sql += fmt::format(
@@ -558,18 +558,20 @@ object_db::query(const label_query& q) {
             "m.key = ?) OR EXISTS (SELECT 1 FROM {0} m WHERE m.{1} = o.digest "
             "AND m.key = ? AND m.value = ?))",
             meta_table, meta_col);
-        params.push_back(k);
-        params.push_back(k);
+        params.push_back(k.string());
+        params.push_back(k.string());
         params.push_back(v);
     }
     if (q.id) {
-        auto id = *q.id;
-        if (id.starts_with("sha256:")) {
-            id = id.substr(7);
+        // a digest matches one object, an id the objects whose digest starts
+        // with it: both are exact matches of a column
+        if (auto d = std::get_if<oci::digest>(&*q.id)) {
+            sql += " AND o.digest = ?";
+            params.push_back(d->string());
+        } else {
+            sql += " AND o.id = ?";
+            params.push_back(std::string(std::get<util::uenv_id>(*q.id).string()));
         }
-        sql += " AND (o.id = ? OR o.digest LIKE ?)";
-        params.push_back(id);
-        params.push_back("sha256:" + id + "%");
     }
     sql += " ORDER BY o.name, o.version, o.release, o.digest";
     auto rows = db_.query(sql, params);

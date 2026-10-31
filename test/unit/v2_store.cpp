@@ -184,6 +184,14 @@ TEST_CASE("3/database: lookup by label, by id, and layers", "[store]") {
     REQUIRE(q("prgenv-gnu%gh200").empty());
     REQUIRE(q(daint->id).size() == 1u);
     REQUIRE(q(daint->digest.string()).size() == 1u);
+    REQUIRE(q(daint->digest.hex()).size() == 1u);
+    // an id is matched exactly: no text of the user reaches a pattern
+    for (auto bad : {"sha256:", "sha256:%", "sha256:_", "sha256:abc"}) {
+        INFO(bad);
+        auto e = uenv::parse_label_query(bad, keys);
+        REQUIRE(!e);
+        REQUIRE(e.error().find(bad) != std::string::npos);
+    }
     // a layer is found only with the marker
     REQUIRE(q("tools").empty());
     REQUIRE(q("+tools").size() == 1u);
@@ -235,6 +243,28 @@ TEST_CASE("3/database: a damaged row is an error that names the database",
         REQUIRE(r.error().find("index.db") != std::string::npos);
     }
     REQUIRE(s.db().get(a.digest));
+}
+
+TEST_CASE("1/runtime merge: the list is parsed once, on the lexer", "[store]") {
+    uenv::label_keys keys;
+    auto items = uenv::parse_item_list(
+        "gnu=prgenv-gnu/24.11:v1,+tools:/opt/tools,./x.squashfs,"
+        "3fa9c2e1d04b7a65",
+        keys, std::nullopt);
+    REQUIRE(items);
+    REQUIRE(items->size() == 4u);
+    REQUIRE((*items)[0].alias == nm("gnu"));
+    REQUIRE((*items)[0].query->name == nm("prgenv-gnu"));
+    REQUIRE((*items)[0].query->release == nm("v1"));
+    REQUIRE((*items)[1].query->layer);
+    REQUIRE((*items)[1].mount == mp("/opt/tools"));
+    REQUIRE((*items)[2].file->is_absolute());
+    REQUIRE((*items)[3].query->id);
+    // an alias that is not a name is an error, not a part of the label
+    for (auto bad : {"-x=tools", "a b=tools", "tools:v1:relative", "x=+tools,"}) {
+        INFO(bad);
+        REQUIRE(!uenv::parse_item_list(bad, keys, std::nullopt));
+    }
 }
 
 TEST_CASE("3/delete: shared blobs stay", "[store]") {

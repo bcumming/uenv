@@ -268,12 +268,7 @@ int image_add(const add_args& args, const global_settings& settings) {
     }
     std::map<uenv::name, std::string> image_meta;
     if (label->system) {
-        auto key = uenv::name::parse(settings.config.label.at);
-        if (!key) {
-            term::error("the setting label.at: {}", key.error());
-            return 1;
-        }
-        image_meta[*key] = *label->system;
+        image_meta[settings.config.label.at] = *label->system;
     }
     auto r = add_squashfs(*s, sqfs, *cfg, image_meta, as_layer);
     if (!r) {

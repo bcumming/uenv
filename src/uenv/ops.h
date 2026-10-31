@@ -22,12 +22,17 @@ namespace uenv {
 
 // the keys of meta that the label syntax maps to (a setting of the site)
 struct label_keys {
-    std::string at = "system";
-    std::string percent = "uarch";
+    uenv::name at = names::system();
+    uenv::name percent = names::uarch();
 };
 
 // a label, or an id, as a query.
 // default_system: the value of the '@' key when the label gives none.
+// the query of a parsed label: the layer marker, and the label
+util::expected<label_query, std::string>
+query_of_label(bool layer, const uenv_label& label, const label_keys& keys,
+               std::optional<std::string> default_system = std::nullopt);
+
 util::expected<label_query, std::string>
 parse_label_query(std::string text, const label_keys& keys,
                   std::optional<std::string> default_system = std::nullopt);

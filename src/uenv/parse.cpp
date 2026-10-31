@@ -157,6 +157,54 @@ parse_view_description(lex::lexer& L) {
     return view_description{{}, name1};
 }
 
+util::expected<uenv_description, parse_error> parse_uenv_description(lex::lexer& L);
+
+layer_marker parse_layer_marker(std::string_view in) {
+    auto L = lex::lexer(in);
+    if (L.current_kind() != lex::tok::plus) {
+        return layer_marker{.rest = in};
+    }
+    L.next();
+    return layer_marker{.layer = true, .rest = in.substr(L.peek().loc)};
+}
+
+util::expected<std::vector<run_item>, parse_error>
+parse_run_items(const std::string& in) {
+    const std::string sanitised = util::strip(in);
+    auto L = lex::lexer(sanitised);
+    std::vector<run_item> items;
+    while (true) {
+        run_item item;
+        // [alias=]: a name followed by '='
+        if (is_name_start_tok(L.current_kind())) {
+            const auto start = L.peek().loc;
+            auto alias = parse_name(L);
+            if (alias && L.current_kind() == lex::tok::equals) {
+                L.next();
+                item.alias = *alias;
+            } else {
+                L.seek(start);
+            }
+        }
+        // [+]: the layer marker
+        if (L.current_kind() == lex::tok::plus) {
+            L.next();
+            item.layer = true;
+        }
+        PARSE(L, uenv_description, item.what);
+        items.push_back(std::move(item));
+        if (L.current_kind() != lex::tok::comma) {
+            break;
+        }
+        L.next();
+    }
+    if (const auto t = L.peek(); t != lex::tok::end) {
+        return util::unexpected(parse_error{
+            L.string(), fmt::format("unexpected symbol '{}'", t.spelling), t});
+    }
+    return items;
+}
+
 util::expected<std::string, parse_error> parse_name(const std::string& in) {
     auto L = lex::lexer(in);
     auto result = parse_name(L);

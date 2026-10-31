@@ -30,6 +30,24 @@ parse_view_args(const std::string& arg);
 util::expected<std::vector<env_view_description>, parse_error>
 parse_env_view_description(const std::string& arg);
 
+// the layer marker '+' at the start of a label (5-discovery.md, "Images and
+// layers"), and the text after it
+struct layer_marker {
+    bool layer = false;
+    std::string_view rest;
+};
+layer_marker parse_layer_marker(std::string_view in);
+
+// one item of the list of uenv run/start and srun --uenv:
+// [alias=][+](label|path)[:mount]
+struct run_item {
+    std::optional<std::string> alias;
+    bool layer = false;
+    uenv_description what;
+};
+util::expected<std::vector<run_item>, parse_error>
+parse_run_items(const std::string& in);
+
 // a name of a v1 label: [A-Za-z0-9_][A-Za-z0-9_.-]*, the whole input
 util::expected<std::string, parse_error> parse_name(const std::string& in);
 

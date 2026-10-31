@@ -9,9 +9,11 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <oci/digest.h>
+#include <util/sha.h>
 #include <uenv/format.h>
 #include <uenv/model.h>
 #include <util/expected.h>
@@ -59,17 +61,20 @@ struct object_record {
     std::optional<std::string> tag;
 };
 
+// the identity of an object that a user gives: its digest, or its id (the
+// first 16 hex characters of the digest)
+using object_id = std::variant<oci::digest, util::uenv_id>;
+
 // a query on the fields of images or layers. A label is a query.
 struct label_query {
     bool layer = false;
-    std::optional<std::string> name;
-    std::optional<std::string> version;
-    std::optional<std::string> release;
+    std::optional<uenv::name> name;
+    std::optional<uenv::name> version;
+    std::optional<uenv::name> release;
     // site keys, for example system and uarch. An object that does not have a
     // key matches each value of the key.
-    std::map<std::string, std::string> meta;
-    // an id (16 hex), a digest, or a hex prefix of at least 8 characters
-    std::optional<std::string> id;
+    std::map<uenv::name, std::string> meta;
+    std::optional<object_id> id;
 };
 
 // The database of images and layers. The local repository uses it with a blob

@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <optional>
+
+#include <uenv/name.h>
 #include <string>
 #include <vector>
 
@@ -40,8 +42,9 @@ struct referrer_rule {
 };
 
 struct label_settings {
-    std::string at = "system";
-    std::string percent = "uarch";
+    // the meta keys of '@' and '%' in a label
+    name at = names::system();
+    name percent = names::uarch();
 };
 
 struct config_base {

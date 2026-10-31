@@ -933,7 +933,20 @@ parse_config_toml(const toml::table& input, const envvars::state& calling_env) {
                                     k.str()),
                         v.source().begin.line);
                 }
-                (k.str() == "at" ? ls.at : ls.percent) = *sv;
+                auto key = name::parse(*sv);
+                if (!key) {
+                    return make_config_error(
+                        fmt::format("label.{}: the meta key {}", k.str(),
+                                    key.error()),
+                        v.source().begin.line);
+                }
+                (k.str() == "at" ? ls.at : ls.percent) = *key;
+            }
+            if (ls.at == ls.percent) {
+                return make_config_error(
+                    fmt::format("label: 'at' and 'percent' are the same key '{}'",
+                                ls.at),
+                    value.source().begin.line);
             }
             config.label = ls;
         } else if (key == "registry") {

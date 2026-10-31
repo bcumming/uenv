@@ -1157,24 +1157,19 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
         auto q = parse_label_query(*a.label, ctx.keys, ctx.default_system);
         if (q && !q->id) {
             const auto& c = img->config();
-            auto text = [](const std::optional<name>& n) {
-                return n ? n->string() : std::string{};
-            };
             std::vector<std::string> bad;
-            if (q->name && *q->name != c.name.string()) {
+            if (q->name && *q->name != c.name) {
                 bad.push_back("name " + c.name.string());
             }
-            if (q->version && *q->version != text(c.version)) {
-                bad.push_back("version " + text(c.version));
+            if (q->version && q->version != c.version) {
+                bad.push_back("version " + (c.version ? c.version->string() : ""));
             }
-            if (q->release && *q->release != text(c.release)) {
-                bad.push_back("release " + text(c.release));
+            if (q->release && q->release != c.release) {
+                bad.push_back("release " + (c.release ? c.release->string() : ""));
             }
             for (auto& [k, v] : q->meta) {
-                for (auto& [ck, cv] : c.meta) {
-                    if (ck.string() == k && cv != v) {
-                        bad.push_back(fmt::format("{} {}", k, cv));
-                    }
+                if (auto it = c.meta.find(k); it != c.meta.end() && it->second != v) {
+                    bad.push_back(fmt::format("{} {}", k, it->second));
                 }
             }
             if (!bad.empty()) {

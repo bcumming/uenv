@@ -34,4 +34,12 @@ inline const std::string& format_as(const name& n) {
     return n.string();
 }
 
+// the names that the code uses as constants: each one is parsed once, here
+namespace names {
+const name& system();
+const name& uarch();
+const name& runtime_merge();
+const name& unnamed();
+} // namespace names
+
 } // namespace uenv
