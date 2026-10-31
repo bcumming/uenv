@@ -215,6 +215,28 @@ TEST_CASE("3/database: a label that matches more than one is an error",
     REQUIRE(r.error().find("id=") != std::string::npos);
 }
 
+TEST_CASE("3/database: a damaged row is an error that names the database",
+          "[store]") {
+    auto s = new_store();
+    auto a = *uenv::add_squashfs(s, fake_sqfs(tmpdir(), "pe"), cfg_of(prgenv()),
+                                 named<std::string>({{"system", "daint"}}), false);
+    for (auto sql : {"UPDATE image_layers SET alias = 'a b'",
+                     "UPDATE image_layers SET mount = 'relative'",
+                     "UPDATE layers SET squashfs = 'sha256:nothex'",
+                     "UPDATE images SET release = 'v1+x'"}) {
+        INFO(sql);
+        auto t = new_store();
+        auto b = *uenv::add_squashfs(t, fake_sqfs(tmpdir(), "pe"), cfg_of(prgenv()),
+                                     {}, false);
+        REQUIRE(t.db().db().query(sql));
+        auto r = t.db().get(b.digest);
+        REQUIRE(!r);
+        REQUIRE(r.error().find("the database") != std::string::npos);
+        REQUIRE(r.error().find("index.db") != std::string::npos);
+    }
+    REQUIRE(s.db().get(a.digest));
+}
+
 TEST_CASE("3/delete: shared blobs stay", "[store]") {
     auto s = new_store();
     auto dir = tmpdir();

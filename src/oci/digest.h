@@ -1,5 +1,6 @@
 #pragma once
 
+#include <compare>
 #include <string>
 #include <string_view>
 
@@ -36,6 +37,8 @@ class digest {
     std::string string() const;
 
     friend bool operator==(const digest&, const digest&) = default;
+    // an order, so that a digest can be the key of a map or a set
+    friend std::strong_ordering operator<=>(const digest&, const digest&) = default;
     friend util::expected<digest, util::parse_error>
         parse_digest(std::string_view);
 

@@ -920,30 +920,38 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
         (void)cat->refresh();
     }
 
+    // the stored objects, parsed once
+    auto objs = format::read_objects(*img, object, s.reader());
+    if (!objs) {
+        return unexpected{objs.error()};
+    }
+
     // 1. the blobs
     for (auto& l : img->layers()) {
-        auto lm = format::parse_layer_manifest(*s.read_blob(*l.layer.digest()));
+        const auto& lm = objs->layers.at(*l.layer.digest());
         auto candidates = layer_candidates(t, l.layer, ctx);
-        if (auto r = ensure_blob(*dst, *l.layer.store.digest, l.layer.store.size,
-                                 {.file = s.blob_path(*l.layer.store.digest)},
+        if (auto r = ensure_blob(*dst, lm.squashfs.digest, lm.squashfs.size,
+                                 {.file = s.blob_path(lm.squashfs.digest)},
                                  candidates, ctx);
             !r) {
             return unexpected{r.error()};
         }
-        auto cbytes = s.read_blob(lm->config.digest);
-        if (auto r = ensure_blob(*dst, lm->config.digest, cbytes->size(),
+        auto cbytes = s.read_blob(lm.config.digest);
+        if (!cbytes) {
+            return unexpected{cbytes.error()};
+        }
+        if (auto r = ensure_blob(*dst, lm.config.digest, cbytes->size(),
                                  {.bytes = *cbytes}, {}, ctx);
             !r) {
             return unexpected{r.error()};
         }
     }
-    std::optional<format::image_index> idx;
-    std::optional<format::wrapper_manifest> wrapper;
-    if (!is_layer) {
-        idx = *format::parse_index(*top);
-        wrapper = *format::parse_wrapper_manifest(*s.read_blob(idx->wrapper.digest));
-        auto ic = s.read_blob(wrapper->config.digest);
-        if (auto r = ensure_blob(*dst, wrapper->config.digest, ic->size(),
+    if (objs->wrapper) {
+        auto ic = s.read_blob(objs->wrapper->config.digest);
+        if (!ic) {
+            return unexpected{ic.error()};
+        }
+        if (auto r = ensure_blob(*dst, objs->wrapper->config.digest, ic->size(),
                                  {.bytes = *ic}, {}, ctx);
             !r) {
             return unexpected{r.error()};
@@ -959,23 +967,25 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     test_fault("push-after-blobs");
 
     // 2. the manifests
-    if (!is_layer) {
-        std::set<std::string> done;
-        for (auto& l : img->layers()) {
-            if (!done.insert(l.layer.digest()->string()).second) {
-                continue;
-            }
-            if (auto r = put_manifest(*dst, l.layer.digest()->string(),
-                                      *s.read_blob(*l.layer.digest()),
-                                      oci::media_type_manifest, ctx);
-                !r) {
+    auto put_stored = [&](const oci::digest& d) -> util::expected<void, std::string> {
+        auto body = s.read_blob(d);
+        if (!body) {
+            return unexpected{body.error()};
+        }
+        if (auto r = put_manifest(*dst, d.string(), *body,
+                                  oci::media_type_manifest, ctx);
+            !r) {
+            return unexpected{r.error()};
+        }
+        return {};
+    };
+    if (objs->index) {
+        for (auto& [d, _] : objs->layers) {
+            if (auto r = put_stored(d); !r) {
                 return unexpected{r.error()};
             }
         }
-        if (auto r = put_manifest(*dst, idx->wrapper.digest.string(),
-                                  *s.read_blob(idx->wrapper.digest),
-                                  oci::media_type_manifest, ctx);
-            !r) {
+        if (auto r = put_stored(objs->index->wrapper.digest); !r) {
             return unexpected{r.error()};
         }
     }
@@ -1239,18 +1249,25 @@ copy(const address& srca, const target& dstt, context& ctx,
                                       "an image"}};
     }
     // read each object from the source, and check it
-    std::map<std::string, std::string> manifests;
+    // the manifests that the copy reads, by digest: the top-level object too
+    std::map<oci::digest, std::string> manifests{{loc->digest, top->body}};
     format::blob_reader reader = [&](const oci::descriptor& d)
         -> util::expected<std::string, std::string> {
+        if (auto it = manifests.find(d.digest); it != manifests.end()) {
+            return it->second;
+        }
         if (d.media_type == oci::media_type_manifest) {
             auto m = src->client.get_manifest(oci::reference::digest(d.digest));
             if (!m) {
                 return unexpected{m.error().message};
             }
-            manifests[d.digest.string()] = m->body;
+            manifests.insert_or_assign(d.digest, m->body);
             return m->body;
         }
         auto tmp = util::make_temp_dir();
+        if (!tmp) {
+            return unexpected{tmp.error()};
+        }
         auto file = *tmp / d.digest.hex();
         if (auto r = src->client.get_blob_to_file(d.digest, file); !r) {
             return unexpected{r.error().message};
@@ -1261,25 +1278,24 @@ copy(const address& srca, const target& dstt, context& ctx,
     if (!img) {
         return unexpected{img.error()};
     }
+    // the objects, parsed once: from the manifests that the load read
+    auto objs = format::read_objects(*img, loc->digest, reader);
+    if (!objs) {
+        return unexpected{objs.error()};
+    }
 
     // the blobs of the layers
-    std::set<std::string> done;
-    for (auto& l : img->layers()) {
-        if (!done.insert(l.layer.digest()->string()).second) {
-            continue;
-        }
-        auto lm = format::parse_layer_manifest(manifests.at(l.layer.digest()->string()));
-        for (auto& [d, size] :
-             {std::pair{*l.layer.store.digest, l.layer.store.size},
-              std::pair{lm->config.digest, std::uint64_t(lm->config.size)}}) {
-            if (auto r = ensure_blob(*dst, d, size, {.repo = &*src}, {}, ctx);
+    for (auto& [d, lm] : objs->layers) {
+        for (auto& [b, size] :
+             {std::pair{lm.squashfs.digest, std::uint64_t(lm.squashfs.size)},
+              std::pair{lm.config.digest, std::uint64_t(lm.config.size)}}) {
+            if (auto r = ensure_blob(*dst, b, size, {.repo = &*src}, {}, ctx);
                 !r) {
                 return unexpected{r.error()};
             }
         }
         if (*kind == format::object_kind::image) {
-            if (auto r = put_manifest(*dst, l.layer.digest()->string(),
-                                      manifests.at(l.layer.digest()->string()),
+            if (auto r = put_manifest(*dst, d.string(), manifests.at(d),
                                       oci::media_type_manifest, ctx);
                 !r) {
                 return unexpected{r.error()};
@@ -1306,9 +1322,9 @@ copy(const address& srca, const target& dstt, context& ctx,
         rec->standalone = true;
     } else if (changes.empty()) {
         // a copy with no change: the same objects, the same digest
-        auto idx = format::parse_index(top->body);
-        auto wbody = manifests.at(idx->wrapper.digest.string());
-        auto w = format::parse_wrapper_manifest(wbody);
+        const auto& idx = objs->index;
+        const auto& w = objs->wrapper;
+        const auto& wbody = manifests.at(idx->wrapper.digest);
         if (auto r = ensure_blob(*dst, w->config.digest, w->config.size,
                                  {.repo = &*src}, {}, ctx);
             !r) {

@@ -962,49 +962,26 @@ store::record(const oci::digest& top, bool standalone_layer) {
         return unexpected{img.error()};
     }
     // the blobs that the object reaches
+    auto objs = format::read_objects(*img, top, reader());
+    if (!objs) {
+        return unexpected{objs.error()};
+    }
     std::vector<oci::digest> blobs{top};
-    if (img->kind() != uenv::image_kind::layer) {
-        auto body = read_blob(top);
-        auto idx = body ? format::parse_index(*body)
-                        : util::expected<format::image_index, format::error>{
-                              unexpected{body.error()}};
-        if (!idx) {
-            return unexpected{idx.error()};
-        }
-        blobs.push_back(idx->wrapper.digest);
-        auto wbody = read_blob(idx->wrapper.digest);
-        auto w = wbody ? format::parse_wrapper_manifest(*wbody)
-                       : util::expected<format::wrapper_manifest, format::error>{
-                             unexpected{wbody.error()}};
-        if (!w) {
-            return unexpected{w.error()};
-        }
-        blobs.push_back(w->config.digest);
+    if (objs->index) {
+        blobs.push_back(objs->index->wrapper.digest);
+        blobs.push_back(objs->wrapper->config.digest);
         blobs.push_back(format::empty_config_digest());
     }
-    for (auto& l : img->layers()) {
-        // a loaded layer has a digest
-        auto d = l.layer.digest();
-        if (!d) {
-            return unexpected{fmt::format("the layer '{}' has no digest", l.alias)};
-        }
-        auto body = read_blob(*d);
-        if (!body) {
-            return unexpected{body.error()};
-        }
-        auto m = format::parse_layer_manifest(*body);
-        if (!m) {
-            return unexpected{m.error()};
-        }
-        blobs.push_back(*d);
-        blobs.push_back(m->config.digest);
-        blobs.push_back(m->squashfs.digest);
+    for (auto& [d, m] : objs->layers) {
+        blobs.push_back(d);
+        blobs.push_back(m.config.digest);
+        blobs.push_back(m.squashfs.digest);
     }
     std::uint64_t size = 0;
-    std::set<std::string> seen;
+    std::set<oci::digest> seen;
     std::vector<oci::digest> unique;
     for (auto& b : blobs) {
-        if (!seen.insert(b.string()).second) {
+        if (!seen.insert(b).second) {
             continue;
         }
         if (!has_blob(b)) {

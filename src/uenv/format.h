@@ -140,6 +140,18 @@ util::expected<layer, error> load_layer(const oci::descriptor& manifest,
                                         const file_locator& locate);
 
 // load an image (index) or a layer (raised) from its top-level object
+// the stored objects of an image or a layer, parsed: each layer manifest by
+// its digest, and the index and the wrapper of an image
+struct stored_objects {
+    std::optional<image_index> index;
+    std::optional<wrapper_manifest> wrapper;
+    std::map<oci::digest, layer_manifest> layers;
+};
+// read and parse the objects of `img`, whose top-level object is `top`
+util::expected<stored_objects, error>
+read_objects(const composed_image& img, const oci::digest& top,
+             const blob_reader& read);
+
 util::expected<composed_image, error>
 load_composed_image(const oci::digest& digest, const std::string& body,
                     const blob_reader& read, const file_locator& locate);

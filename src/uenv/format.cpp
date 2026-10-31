@@ -944,6 +944,51 @@ util::expected<layer, error> load_layer(const oci::descriptor& desc,
                        layer_descriptor(desc.digest, body->size()));
 }
 
+util::expected<stored_objects, error>
+read_objects(const composed_image& img, const oci::digest& top,
+             const blob_reader& read) {
+    stored_objects out;
+    if (img.kind() == image_kind::image) {
+        auto body = read(oci::descriptor{
+            .media_type = std::string(oci::media_type_index), .digest = top});
+        if (!body) {
+            return unexpected{body.error()};
+        }
+        auto idx = parse_index(*body);
+        if (!idx) {
+            return unexpected{idx.error()};
+        }
+        auto wbody = read(idx->wrapper);
+        if (!wbody) {
+            return unexpected{wbody.error()};
+        }
+        auto w = parse_wrapper_manifest(*wbody);
+        if (!w) {
+            return unexpected{w.error()};
+        }
+        out.index = std::move(*idx);
+        out.wrapper = std::move(*w);
+    } else if (img.kind() == image_kind::runtime_merge) {
+        return unexpected{error{"a runtime merge has no stored objects"}};
+    }
+    for (auto& l : img.layers()) {
+        if (!l.layer.manifest) {
+            return unexpected{fmt::format(
+                "the layer '{}' has no layer manifest: it is not stored", l.alias)};
+        }
+        auto body = read(*l.layer.manifest);
+        if (!body) {
+            return unexpected{body.error()};
+        }
+        auto m = parse_layer_manifest(*body);
+        if (!m) {
+            return unexpected{m.error()};
+        }
+        out.layers.insert_or_assign(l.layer.manifest->digest, std::move(*m));
+    }
+    return out;
+}
+
 util::expected<composed_image, error>
 load_composed_image(const oci::digest& digest, const std::string& body,
                     const blob_reader& read, const file_locator& locate) {
