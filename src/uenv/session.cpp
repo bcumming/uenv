@@ -93,12 +93,11 @@ prepare_session(const std::string& uenv_arg,
     if (auto r = check_nested_mounts(*img); !r) {
         return unexpected{r.error()};
     }
-    std::vector<view_description> requested;
+    std::vector<view_request> requested;
     if (view_arg) {
-        auto v = parse_view_args(*view_arg);
+        auto v = parse_view_requests(*view_arg);
         if (!v) {
-            return unexpected{
-                fmt::format("invalid --view: {}", v.error().message())};
+            return unexpected{fmt::format("invalid --view: {}", v.error())};
         }
         requested = std::move(*v);
     }
@@ -130,29 +129,29 @@ prepare_session(const std::string& uenv_arg,
     for (auto& l : img->layers) {
         std::vector<std::string> lviews;
         for (auto& v : views) {
-            auto it = img->views.find({.item = v.uenv, .name = v.name});
+            auto it = img->views.find(image_view_name{.item = v.item, .name = v.name});
             if (it != img->views.end()) {
                 for (auto& inc : it->second.include) {
                     if (inc.alias == l.alias) {
-                        lviews.push_back(inc.view);
+                        lviews.push_back(inc.view.string());
                     }
                 }
-            } else if (v.uenv == l.alias) {
-                lviews.push_back(v.name);
+            } else if (v.item == l.alias) {
+                lviews.push_back(v.name.string());
             }
         }
         auto& cfg = l.layer.config;
         nlohmann::json e{{"mount", l.mount.string()},
                          {"sqfs", l.layer.store.file->string()},
                          {"views", lviews},
-                         {"name", l.alias}};
+                         {"name", l.alias.string()}};
         e["digest"] = l.layer.store.digest
                           ? nlohmann::json(l.layer.store.digest->hex())
                           : nlohmann::json(nullptr);
-        e["label"] = cfg.version.empty()
+        e["label"] = !cfg.version || !cfg.release
                          ? nlohmann::json(nullptr)
                          : nlohmann::json(fmt::format("{}/{}:{}", cfg.name,
-                                                      cfg.version, cfg.release));
+                                                      *cfg.version, *cfg.release));
         tel.push_back(e);
     }
     out.environment.set("UENV_TELEMETRY", tel.dump());

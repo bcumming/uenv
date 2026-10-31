@@ -189,8 +189,8 @@ reg::address addr(env_t& e, const std::string& text,
 }
 
 uenv::object_record add_image(uenv::store& s, uenv::layer l,
-                              std::map<std::string, std::string> meta = {}) {
-    return *uenv::add_squashfs(s, fake_sqfs(l.config.name + l.mount.string()),
+                              std::map<uenv::name, std::string> meta = {}) {
+    return *uenv::add_squashfs(s, fake_sqfs(l.config.name.string() + l.mount.string()),
                                format::layer_config_of(l), meta, false);
 }
 
@@ -253,7 +253,7 @@ TEST_CASE("4/push and pull an image", "[registry]") {
     REQUIRE_ZOT();
     auto e = make_env(shared_zot().base);
     auto s = new_store();
-    auto img = add_image(s, prgenv(), {{"system", "daint"}});
+    auto img = add_image(s, prgenv(), named<std::string>({{"system", "daint"}}));
     auto t = *reg::resolve_target(e->cfg, {});
     auto r = reg::push(s, img.digest, t, e->ctx);
     REQUIRE(r);
@@ -426,7 +426,7 @@ TEST_CASE("4/copy with no change, and its referrers", "[registry]") {
     auto s = new_store();
     auto build = *reg::resolve_target(e->cfg, "build");
     auto deploy = *reg::resolve_target(e->cfg, "deploy");
-    auto img = add_image(s, prgenv(), {{"system", "daint"}});
+    auto img = add_image(s, prgenv(), named<std::string>({{"system", "daint"}}));
     REQUIRE(reg::push(s, img.digest, build, e->ctx));
 
     auto a = addr(*e, "build::prgenv-gnu");
@@ -472,7 +472,7 @@ TEST_CASE("4/copy with a change is a new image with the same layers",
     auto e = make_env(shared_zot().base, rules);
     auto s = new_store();
     auto deploy = *reg::resolve_target(e->cfg, "deploy");
-    auto img = add_image(s, prgenv(), {{"system", "daint"}});
+    auto img = add_image(s, prgenv(), named<std::string>({{"system", "daint"}}));
     REQUIRE(reg::push(s, img.digest, deploy, e->ctx));
     auto a = addr(*e, "prgenv-gnu@daint");
     REQUIRE(reg::attach(a, "uenv/signature", "sig", e->ctx));
@@ -503,8 +503,8 @@ TEST_CASE("4/delete removes the top-level object only", "[registry]") {
     auto e = make_env(shared_zot().base);
     auto s = new_store();
     auto t = *reg::resolve_target(e->cfg, {});
-    auto a = add_image(s, prgenv(), {{"system", "daint"}});
-    auto b = add_image(s, prgenv(), {{"system", "santis"}});
+    auto a = add_image(s, prgenv(), named<std::string>({{"system", "daint"}}));
+    auto b = add_image(s, prgenv(), named<std::string>({{"system", "santis"}}));
     REQUIRE(reg::push(s, a.digest, t, e->ctx));
     REQUIRE(reg::push(s, b.digest, t, e->ctx));
     auto d = reg::remove(addr(*e, "prgenv-gnu@daint"), e->ctx);
@@ -657,8 +657,8 @@ TEST_CASE("5/catalogue: find each repository that has a layer",
     auto e = make_env(shared_zot().base);
     auto t = *reg::resolve_target(e->cfg, {});
     auto s = new_store();
-    auto a = add_image(s, prgenv(), {{"system", "daint"}});
-    auto b = add_image(s, prgenv(), {{"system", "santis"}});
+    auto a = add_image(s, prgenv(), named<std::string>({{"system", "daint"}}));
+    auto b = add_image(s, prgenv(), named<std::string>({{"system", "santis"}}));
     REQUIRE(reg::push(s, a.digest, t, e->ctx));
     REQUIRE(reg::push(s, b.digest, t, e->ctx));
     auto cat = *reg::catalogue::open(t, e->ctx);
@@ -731,8 +731,8 @@ TEST_CASE("4/delete and registry GC keep the layers of other images",
     auto e = make_env(gcz.base);
     auto t = *reg::resolve_target(e->cfg, {});
     auto s = new_store();
-    auto a = add_image(s, prgenv(), {{"system", "daint"}});
-    auto b = add_image(s, prgenv(), {{"system", "santis"}});
+    auto a = add_image(s, prgenv(), named<std::string>({{"system", "daint"}}));
+    auto b = add_image(s, prgenv(), named<std::string>({{"system", "santis"}}));
     REQUIRE(reg::push(s, a.digest, t, e->ctx));
     REQUIRE(reg::push(s, b.digest, t, e->ctx));
     REQUIRE(reg::remove(addr(*e, "prgenv-gnu@daint"), e->ctx));
@@ -764,7 +764,7 @@ TEST_CASE("5/catalogue: an event that does not match the configs",
     // a wrong event: the label tools/1.0:v1 for the digest of prgenv-gnu
     auto cat = *reg::catalogue::open(t, e->ctx);
     auto rec = app;
-    rec.cfg.name = "tools";
+    rec.cfg.name = nm("tools");
     REQUIRE(cat.append({"add", r->repository, r->tag, rec}));
     auto s2 = new_store();
     auto p = reg::pull(s2, addr(*e, "tools/1.0:v1"), e->ctx);
@@ -788,7 +788,7 @@ TEST_CASE("5/catalogue: the cost of a first fill grows with the history",
         auto start = std::chrono::steady_clock::now();
         for (unsigned i = 0; i < 50; ++i, ++total) {
             auto rec = img;
-            rec.cfg.version = fmt::format("{}", total);
+            rec.cfg.version = nm(fmt::format("{}", total));
             REQUIRE(cat.append({"add", "x/tools", "t", rec}));
         }
         auto append = std::chrono::duration<double>(

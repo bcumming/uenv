@@ -26,7 +26,7 @@ label_keys keys_of(const configuration& config);
 struct session {
     composed_image image;
     concrete_image concrete;
-    std::vector<view_description> views;
+    std::vector<view_request> views;
     envvars::state environment;
     std::vector<std::string> mounts; // "file:mount"
 };

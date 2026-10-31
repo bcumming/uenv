@@ -46,6 +46,9 @@ struct blob {
 };
 blob make_blob(std::string bytes);
 
+// the digest of the OCI empty config "{}"
+oci::digest empty_config_digest();
+
 // the descriptor of a layer manifest, as an image index refers to it
 oci::descriptor layer_descriptor(const oci::digest& digest, std::size_t size);
 
@@ -73,8 +76,8 @@ env_from_json(const nlohmann::json& j,
 
 struct image_config {
     config shared;
-    std::map<std::string, image_view> views;
-    std::optional<std::string> default_view;
+    std::map<uenv::name, image_view> views;
+    std::optional<uenv::name> default_view;
 };
 
 nlohmann::json to_json(const layer_config& c);
@@ -95,7 +98,7 @@ struct wrapper_manifest {
 };
 struct index_entry {
     oci::descriptor manifest;
-    std::string alias;
+    uenv::name alias;
     mount_point mount;
 };
 struct image_index {

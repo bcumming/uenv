@@ -110,13 +110,13 @@ TEST_CASE("3/add: add promotes a squashfs file to an image", "[store]") {
     auto s = new_store();
     auto dir = tmpdir();
     auto r = uenv::add_squashfs(s, fake_sqfs(dir, "tools"), cfg_of(tools()),
-                                {{"system", "daint"}}, false);
+                                named<std::string>({{"system", "daint"}}), false);
     REQUIRE(r);
     REQUIRE(r->kind == format::object_kind::image);
-    REQUIRE(r->cfg.meta.at("system") == "daint");
-    REQUIRE(r->cfg.meta.at("uarch") == "zen2");
+    REQUIRE(r->cfg.meta.at(nm("system")) == "daint");
+    REQUIRE(r->cfg.meta.at(nm("uarch")) == "zen2");
     REQUIRE(r->layers.size() == 1u);
-    REQUIRE(r->layers[0].cfg.meta.count("system") == 0u);
+    REQUIRE(r->layers[0].cfg.meta.count(nm("system")) == 0u);
     // five objects + the empty blob
     std::size_t n = 0;
     for (auto& e : fs::directory_iterator(s.v2() / "blobs" / "sha256")) {
@@ -152,7 +152,7 @@ TEST_CASE("3/add: the same file gives the same identity", "[store]") {
 TEST_CASE("3/add: a release is required", "[store]") {
     auto s = new_store();
     auto c = cfg_of(tools());
-    c.shared.release = "";
+    c.shared.release = std::nullopt;
     REQUIRE(!uenv::add_squashfs(s, fake_sqfs(tmpdir(), "t"), c, {}, false));
 }
 
@@ -160,9 +160,9 @@ TEST_CASE("3/database: lookup by label, by id, and layers", "[store]") {
     auto s = new_store();
     auto dir = tmpdir();
     auto daint = uenv::add_squashfs(s, fake_sqfs(dir, "pe"), cfg_of(prgenv()),
-                                    {{"system", "daint"}}, false);
+                                    named<std::string>({{"system", "daint"}}), false);
     auto santis = uenv::add_squashfs(s, fake_sqfs(dir, "pe"), cfg_of(prgenv()),
-                                     {{"system", "santis"}}, false);
+                                     named<std::string>({{"system", "santis"}}), false);
     auto layer = uenv::add_squashfs(s, fake_sqfs(dir, "tools"), cfg_of(tools()),
                                     {}, true);
     REQUIRE(daint);
@@ -206,9 +206,9 @@ TEST_CASE("3/database: a label that matches more than one is an error",
     stores.push_back(new_store());
     auto dir = tmpdir();
     uenv::add_squashfs(stores[0], fake_sqfs(dir, "pe"), cfg_of(prgenv()),
-                       {{"system", "daint"}}, false);
+                       named<std::string>({{"system", "daint"}}), false);
     uenv::add_squashfs(stores[0], fake_sqfs(dir, "pe"), cfg_of(prgenv()),
-                       {{"system", "santis"}}, false);
+                       named<std::string>({{"system", "santis"}}), false);
     auto q = *uenv::parse_label_query("prgenv-gnu", {});
     auto r = uenv::find_unique(stores, q, "prgenv-gnu");
     REQUIRE(!r);
@@ -219,9 +219,9 @@ TEST_CASE("3/delete: shared blobs stay", "[store]") {
     auto s = new_store();
     auto dir = tmpdir();
     auto a = *uenv::add_squashfs(s, fake_sqfs(dir, "pe"), cfg_of(prgenv()),
-                                 {{"system", "daint"}}, false);
+                                 named<std::string>({{"system", "daint"}}), false);
     auto b = *uenv::add_squashfs(s, fake_sqfs(dir, "pe"), cfg_of(prgenv()),
-                                 {{"system", "santis"}}, false);
+                                 named<std::string>({{"system", "santis"}}), false);
     auto sqfs = a.layers[0].squashfs;
     auto released = s.remove(a.digest);
     REQUIRE(released);
@@ -395,13 +395,24 @@ TEST_CASE("1/compose: an image from layers", "[store][compose]") {
     REQUIRE(r->layers[0].digest == pe.digest);
     REQUIRE(r->layers[1].digest == t.digest);
 
+    SECTION("an alias is a name") {
+        for (auto bad : {json("my tools"), json(42), json("a:b")}) {
+            INFO(bad.dump());
+            auto e = spec;
+            e["layers"][0]["alias"] = bad;
+            auto m = uenv::compose(s, e, {});
+            REQUIRE(!m);
+            REQUIRE(m.error().find("the alias") != std::string::npos);
+        }
+    }
+
     SECTION("a relocatable layer moves") {
         spec["layers"][0]["mount"] = "/opt/tools";
         auto m = uenv::compose(s, spec, {});
         REQUIRE(m);
         // sorted by mount point: /opt/tools is now first
         REQUIRE(m->layers[0].digest == t.digest);
-        REQUIRE(m->layers[0].mount == "/opt/tools");
+        REQUIRE(m->layers[0].mount == mp("/opt/tools"));
         auto img = *s.load(m->digest);
         auto c = *uenv::concretise(img, {});
         envvars::state env;

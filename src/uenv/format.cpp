@@ -14,6 +14,7 @@
 #include <uenv/parse.h>
 #include <util/jcs.h>
 #include <util/sha.h>
+#include <util/strings.h>
 
 namespace uenv::format {
 
@@ -23,6 +24,10 @@ using util::unexpected;
 blob make_blob(std::string bytes) {
     auto d = oci::digest::sha256(util::sha256_string(bytes));
     return blob{std::move(bytes), d};
+}
+
+oci::digest empty_config_digest() {
+    return make_blob(std::string(oci::empty_config_body)).digest;
 }
 
 oci::descriptor layer_descriptor(const oci::digest& digest, std::size_t size) {
@@ -154,7 +159,18 @@ util::expected<oci::descriptor, error> parse_descriptor(const json& j,
     }
     if (auto data = opt_string(j, "data", what); !data) {
         return unexpected{data.error()};
-    } else {
+    } else if (*data) {
+        // inline content: base64 of exactly the bytes of the digest
+        auto bytes = util::base64_decode(**data);
+        if (!bytes) {
+            return unexpected{
+                fmt::format("{}: the 'data' of a descriptor is not base64", what)};
+        }
+        if (bytes->size() != desc.size || make_blob(*bytes).digest != desc.digest) {
+            return unexpected{fmt::format(
+                "{}: the 'data' of a descriptor does not match its digest {}",
+                what, desc.digest.string())};
+        }
         desc.data = *data;
     }
     return desc;
@@ -177,26 +193,41 @@ util::expected<json, error> parse_json_object(std::string_view body,
     return j;
 }
 
+// a required field that is a name
+util::expected<name, error> req_name(const json& j, std::string_view key,
+                                     std::string_view what) {
+    auto v = req_string(j, key, what);
+    if (!v) {
+        return unexpected{v.error()};
+    }
+    auto n = name::parse(*v);
+    if (!n) {
+        return unexpected{fmt::format("{}: the field '{}': {}", what, key, n.error())};
+    }
+    return *n;
+}
+
 util::expected<config, error> parse_shared(const json& j, std::string_view what) {
-    config c;
-    for (auto [key, field] : {std::pair{"name", &c.name},
-                              std::pair{"version", &c.version},
-                              std::pair{"release", &c.release}}) {
-        auto v = req_string(j, key, what);
-        if (!v) {
-            return unexpected{v.error()};
-        }
-        if (v->empty()) {
-            return unexpected{
-                fmt::format("{}: the field '{}' must not be empty", what, key)};
-        }
-        *field = *v;
+    auto n = req_name(j, "name", what);
+    if (!n) {
+        return unexpected{n.error()};
+    }
+    auto version = req_name(j, "version", what);
+    if (!version) {
+        return unexpected{version.error()};
+    }
+    auto release = req_name(j, "release", what);
+    if (!release) {
+        return unexpected{release.error()};
     }
     auto d = opt_string(j, "description", what);
     if (!d) {
         return unexpected{d.error()};
     }
-    c.description = d->value_or("");
+    config c{.name = *n,
+             .version = *version,
+             .release = *release,
+             .description = d->value_or("")};
     auto m = j.find("meta");
     if (m == j.end()) {
         return unexpected{
@@ -210,21 +241,32 @@ util::expected<config, error> parse_shared(const json& j, std::string_view what)
             return unexpected{fmt::format(
                 "{}: the value of meta '{}' must be a string", what, it.key())};
         }
-        c.meta[it.key()] = it->get<std::string>();
+        auto key = name::parse(it.key());
+        if (!key) {
+            return unexpected{
+                fmt::format("{}: the meta key {}", what, key.error())};
+        }
+        c.meta[*key] = it->get<std::string>();
     }
     return c;
 }
 
+// a stored config has a version and a release: the writers check it
+// (check_storable) before they call this
 void write_shared(json& j, const config& c) {
-    j["name"] = c.name;
-    j["version"] = c.version;
-    j["release"] = c.release;
+    j["name"] = c.name.string();
+    if (c.version) {
+        j["version"] = c.version->string();
+    }
+    if (c.release) {
+        j["release"] = c.release->string();
+    }
     if (!c.description.empty()) {
         j["description"] = c.description;
     }
     j["meta"] = json::object();
     for (auto& [k, v] : c.meta) {
-        j["meta"][k] = v;
+        j["meta"][k.string()] = v;
     }
 }
 
@@ -264,11 +306,29 @@ env_from_json(const json& j, std::vector<std::string>* warnings) {
     if (!j.is_object()) {
         return unexpected{error{"env: must be an object"}};
     }
+    // uenv sets only variables with a valid name ("Variables in a value")
+    auto check_name = [](const std::string& n) -> util::expected<void, error> {
+        const bool valid =
+            !n.empty() && !std::isdigit(static_cast<unsigned char>(n[0])) &&
+            std::all_of(n.begin(), n.end(), [](unsigned char c) {
+                return std::isalnum(c) || c == '_';
+            });
+        if (!valid) {
+            return unexpected{fmt::format(
+                "env: '{}' is not a valid variable name: a name has the form "
+                "[A-Za-z_][A-Za-z0-9_]*",
+                n)};
+        }
+        return {};
+    };
     if (auto s = j.find("scalar"); s != j.end()) {
         if (!s->is_object()) {
             return unexpected{error{"env: 'scalar' must be an object"}};
         }
         for (auto it = s->begin(); it != s->end(); ++it) {
+            if (auto r = check_name(it.key()); !r) {
+                return unexpected{r.error()};
+            }
             if (it->is_null()) {
                 p.update_scalar(it.key(), std::nullopt);
             } else if (it->is_string()) {
@@ -284,6 +344,9 @@ env_from_json(const json& j, std::vector<std::string>* warnings) {
             return unexpected{error{"env: 'list' must be an object"}};
         }
         for (auto it = l->begin(); it != l->end(); ++it) {
+            if (auto r = check_name(it.key()); !r) {
+                return unexpected{r.error()};
+            }
             if (!it->is_array()) {
                 return unexpected{fmt::format(
                     "env: the updates of '{}' must be a list", it.key())};
@@ -357,10 +420,10 @@ json to_json(const layer_config& c) {
             jv["description"] = v.description;
         }
         jv["env"] = env_to_json(v.env);
-        j["views"][name] = jv;
+        j["views"][name.string()] = jv;
     }
     if (c.default_view) {
-        j["default_view"] = *c.default_view;
+        j["default_view"] = c.default_view->string();
     }
     return j;
 }
@@ -385,28 +448,36 @@ json to_json(const image_config& c) {
         if (!env.empty()) {
             jv["env"] = env;
         }
-        j["views"][name] = jv;
+        j["views"][name.string()] = jv;
     }
     if (c.default_view) {
-        j["default_view"] = *c.default_view;
+        j["default_view"] = c.default_view->string();
     }
     return j;
 }
 
 namespace {
 
-util::expected<std::optional<std::string>, error>
+util::expected<std::optional<name>, error>
 parse_default_view(const json& j, std::string_view what,
-                   const std::function<bool(const std::string&)>& exists) {
+                   const std::function<bool(const name&)>& exists) {
     auto d = opt_string(j, "default_view", what);
     if (!d) {
         return unexpected{d.error()};
     }
-    if (*d && !exists(**d)) {
+    if (!*d) {
+        return std::optional<name>{};
+    }
+    auto n = name::parse(**d);
+    if (!n) {
+        return unexpected{
+            fmt::format("{}: the default view {}", what, n.error())};
+    }
+    if (!exists(*n)) {
         return unexpected{fmt::format(
             "{}: the default view '{}' is not a view", what, **d)};
     }
-    return *d;
+    return std::optional<name>{*n};
 }
 
 } // namespace
@@ -443,7 +514,7 @@ util::expected<layer_config, error> parse_layer_config(std::string_view body) {
         return unexpected{
             fmt::format("{}: the required field 'views' must be an object", what)};
     }
-    std::map<std::string, layer_view> layer_views;
+    std::map<name, layer_view> layer_views;
     for (auto it = views->begin(); it != views->end(); ++it) {
         if (!it->is_object()) {
             return unexpected{
@@ -463,14 +534,14 @@ util::expected<layer_config, error> parse_layer_config(std::string_view body) {
             }
             v.env = *env;
         }
-        auto vname = parse_view_name(it.key());
+        auto vname = name::parse(it.key());
         if (!vname) {
-            return unexpected{fmt::format("{}: the view name '{}' is not valid: {}",
-                                          what, it.key(), vname.error().message())};
+            return unexpected{
+                fmt::format("{}: the view name {}", what, vname.error())};
         }
         layer_views[*vname] = std::move(v);
     }
-    auto dv = parse_default_view(*j, what, [&](const std::string& n) {
+    auto dv = parse_default_view(*j, what, [&](const name& n) {
         return layer_views.contains(n);
     });
     if (!dv) {
@@ -489,12 +560,11 @@ util::expected<image_config, error> parse_image_config(std::string_view body) {
     if (!j) {
         return unexpected{j.error()};
     }
-    image_config c;
     auto shared = parse_shared(*j, what);
     if (!shared) {
         return unexpected{shared.error()};
     }
-    c.shared = *shared;
+    std::map<name, image_view> image_views;
     auto views = j->find("views");
     if (views == j->end() || !views->is_object()) {
         return unexpected{
@@ -522,10 +592,8 @@ util::expected<image_config, error> parse_image_config(std::string_view body) {
             for (auto& x : *inc) {
                 auto r = parse_layer_view_ref(x.get<std::string>());
                 if (!r) {
-                    return unexpected{fmt::format(
-                        "{}: the view '{}': '{}' is not a layer view of the "
-                        "form alias:view",
-                        what, it.key(), x.get<std::string>())};
+                    return unexpected{fmt::format("{}: the view '{}': {}", what,
+                                                  it.key(), r.error())};
                 }
                 v.include.push_back(*r);
             }
@@ -538,21 +606,22 @@ util::expected<image_config, error> parse_image_config(std::string_view body) {
             }
             v.env = *env;
         }
-        auto vname = parse_view_name(it.key());
+        auto vname = name::parse(it.key());
         if (!vname) {
-            return unexpected{fmt::format("{}: the view name '{}' is not valid: {}",
-                                          what, it.key(), vname.error().message())};
+            return unexpected{
+                fmt::format("{}: the view name {}", what, vname.error())};
         }
-        c.views[*vname] = std::move(v);
+        image_views[*vname] = std::move(v);
     }
-    auto dv = parse_default_view(*j, what, [&](const std::string& n) {
-        return c.views.contains(n);
+    auto dv = parse_default_view(*j, what, [&](const name& n) {
+        return image_views.contains(n);
     });
     if (!dv) {
         return unexpected{dv.error()};
     }
-    c.default_view = *dv;
-    return c;
+    return image_config{.shared = std::move(*shared),
+                        .views = std::move(image_views),
+                        .default_view = std::move(*dv)};
 }
 
 //
@@ -575,10 +644,7 @@ util::expected<blob, error> make_layer_manifest(const blob& config,
 }
 
 util::expected<blob, error> make_wrapper_manifest(const blob& image_config) {
-    auto empty = descriptor_json(oci::media_type_empty,
-                                 *oci::digest::parse(fmt::format(
-                                     "sha256:{}", oci::empty_config_hex)),
-                                 2);
+    auto empty = descriptor_json(oci::media_type_empty, empty_config_digest(), 2);
     empty["data"] = oci::empty_config_data;
     json j{{"schemaVersion", 2},
            {"mediaType", oci::media_type_manifest},
@@ -607,7 +673,7 @@ util::expected<blob, error> make_index(const blob& wrapper,
                                  e.manifest.size);
         d["artifactType"] = at_layer;
         d["annotations"] =
-            json{{ann_alias, e.alias}, {ann_mount, e.mount.string()}};
+            json{{ann_alias, e.alias.string()}, {ann_mount, e.mount.string()}};
         manifests.push_back(d);
     }
     json j{{"schemaVersion", 2},
@@ -783,7 +849,7 @@ util::expected<image_index, error> parse_index(std::string_view body) {
             return unexpected{
                 fmt::format("{}: layer entry {} has no annotations", what, i)};
         }
-        auto alias = req_string(*ann, ann_alias, fmt::format("{}: entry {}", what, i));
+        auto alias = req_name(*ann, ann_alias, fmt::format("{}: entry {}", what, i));
         if (!alias) {
             return unexpected{alias.error()};
         }
@@ -966,11 +1032,29 @@ image_config image_config_of(const composed_image& img) {
     return c;
 }
 
+namespace {
+
+// a stored config has a version and a release
+util::expected<void, error> check_storable(const config& c, std::string_view what) {
+    if (!c.version || !c.release) {
+        return unexpected{fmt::format(
+            "the {} {} has no version and release, and cannot be stored: give "
+            "a label, for example {}/1.0:v1",
+            what, c.name, c.name)};
+    }
+    return {};
+}
+
+} // namespace
+
 util::expected<image_objects, error> make_image_objects(const composed_image& img) {
     if (img.kind == image_kind::runtime_merge) {
         return unexpected{error{"a runtime merge cannot be stored: it has no "
                                 "image config. Write an image config that "
                                 "contains the layers, and compose it."}};
+    }
+    if (auto r = check_storable(img.config, "image"); !r) {
+        return unexpected{r.error()};
     }
     auto cfg_bytes = canonical(to_json(image_config_of(img)));
     if (!cfg_bytes) {
@@ -1011,6 +1095,9 @@ util::expected<layer_objects, error> make_layer_objects(const layer_config& c,
     if (!store.digest) {
         return unexpected{error{"the squashfs of the layer has no digest"}};
     }
+    if (auto r = check_storable(c.shared, "layer"); !r) {
+        return unexpected{r.error()};
+    }
     auto cfg_bytes = canonical(to_json(c));
     if (!cfg_bytes) {
         return unexpected{cfg_bytes.error()};
@@ -1044,7 +1131,9 @@ std::string short_id(const oci::digest& d) {
 }
 
 std::string make_tag(const config& c, const oci::digest& d) {
-    std::string readable = c.version + "-" + c.release;
+    // a stored config has a version and a release
+    std::string readable = fmt::format("{}-{}", c.version ? c.version->string() : "",
+                                       c.release ? c.release->string() : "");
     for (auto& [k, v] : c.meta) {
         readable += "-" + v;
     }

@@ -88,8 +88,18 @@ CREATE TABLE IF NOT EXISTS locations (
     PRIMARY KEY (object, repository, tag));
 )";
 
-oci::digest to_digest(const std::string& s) {
-    return *oci::digest::parse(s);
+// a stored config has a version and a release: an absent one is written as ''
+std::string opt_name(const std::optional<name>& n) {
+    return n ? n->string() : std::string{};
+}
+
+// a digest that the database holds
+util::expected<oci::digest, std::string> to_digest(const std::string& s) {
+    auto d = oci::digest::parse(s);
+    if (!d) {
+        return unexpected{fmt::format("'{}' is not a digest", s)};
+    }
+    return *d;
 }
 
 } // namespace
@@ -100,7 +110,7 @@ object_db::open(const fs::path& path, util::sqlite::open_mode mode) {
     if (!db) {
         return unexpected{db.error()};
     }
-    object_db result{std::move(*db)};
+    object_db result{std::move(*db), path};
     auto version = result.db_.user_version();
     if (!version) {
         return unexpected{version.error()};
@@ -123,7 +133,7 @@ util::expected<object_db, std::string> object_db::memory() {
     if (!db) {
         return unexpected{db.error()};
     }
-    object_db result{std::move(*db)};
+    object_db result{std::move(*db), ":memory:"};
     if (auto r = result.init_schema(); !r) {
         return unexpected{r.error()};
     }
@@ -144,22 +154,23 @@ util::expected<void, std::string> insert_layer(util::sqlite::database& db,
                                                const config& cfg,
                                                const oci::digest& sqfs,
                                                std::uint64_t sqfs_size,
-                                               const std::string& mount,
+                                               const mount_point& mount,
                                                bool relocatable) {
     auto r = db.query(
         "INSERT OR IGNORE INTO layers (digest, id, squashfs, squashfs_size, "
         "name, version, release, description, mount, relocatable) VALUES "
         "(?,?,?,?,?,?,?,?,?,?)",
         {d.string(), format::short_id(d), sqfs.string(),
-         std::int64_t(sqfs_size), cfg.name, cfg.version, cfg.release,
-         cfg.description, mount, std::int64_t(relocatable)});
+         std::int64_t(sqfs_size), cfg.name.string(), opt_name(cfg.version),
+         opt_name(cfg.release), cfg.description, mount.string(),
+         std::int64_t(relocatable)});
     if (!r) {
         return unexpected{r.error()};
     }
     for (auto& [k, v] : cfg.meta) {
         auto m = db.query(
             "INSERT OR IGNORE INTO layer_meta (layer, key, value) VALUES (?,?,?)",
-            {d.string(), k, v});
+            {d.string(), k.string(), v});
         if (!m) {
             return unexpected{m.error()};
         }
@@ -177,15 +188,16 @@ object_db::add(const object_record& r, const std::vector<oci::digest>& blobs) {
             auto q = db_.query(
                 "INSERT OR IGNORE INTO images (digest, id, added, size, name, "
                 "version, release, description) VALUES (?,?,?,?,?,?,?,?)",
-                {d, r.id, r.added, std::int64_t(r.size), r.cfg.name,
-                 r.cfg.version, r.cfg.release, r.cfg.description});
+                {d, r.id, r.added, std::int64_t(r.size), r.cfg.name.string(),
+                 opt_name(r.cfg.version), opt_name(r.cfg.release),
+                 r.cfg.description});
             if (!q) {
                 return unexpected{q.error()};
             }
             for (auto& [k, v] : r.cfg.meta) {
                 auto m = db_.query("INSERT OR IGNORE INTO image_meta (image, "
                                    "key, value) VALUES (?,?,?)",
-                                   {d, k, v});
+                                   {d, k.string(), v});
                 if (!m) {
                     return unexpected{m.error()};
                 }
@@ -200,19 +212,21 @@ object_db::add(const object_record& r, const std::vector<oci::digest>& blobs) {
                 auto q2 = db_.query("INSERT OR IGNORE INTO image_layers "
                                     "(image, alias, mount, layer) VALUES "
                                     "(?,?,?,?)",
-                                    {d, l.alias, l.mount, l.digest.string()});
+                                    {d, l.alias.string(), l.mount.string(),
+                                     l.digest.string()});
                 if (!q2) {
                     return unexpected{q2.error()};
                 }
             }
         } else {
-            if (!r.squashfs) {
-                return unexpected{std::string{"a layer record has no squashfs"}};
+            if (!r.squashfs || !r.mount) {
+                return unexpected{std::string{
+                    "a layer record has no squashfs or no mount point"}};
             }
             if (auto x = insert_layer(db_, r.digest, r.cfg, *r.squashfs,
                                       r.layers.empty() ? 0
                                                        : r.layers[0].squashfs_size,
-                                      r.mount, r.relocatable);
+                                      *r.mount, r.relocatable);
                 !x) {
                 return x;
             }
@@ -254,7 +268,12 @@ object_db::blobs_of(const oci::digest& object) {
     }
     std::vector<oci::digest> out;
     for (auto& r : *rows) {
-        out.push_back(to_digest(r.text("blob")));
+        auto b = to_digest(r.text("blob"));
+        if (!b) {
+            return unexpected{fmt::format("the database {}: {}", path_.string(),
+                                          b.error())};
+        }
+        out.push_back(*b);
     }
     return out;
 }
@@ -266,7 +285,12 @@ util::expected<std::vector<oci::digest>, std::string> object_db::all_blobs() {
     }
     std::vector<oci::digest> out;
     for (auto& r : *rows) {
-        out.push_back(to_digest(r.text("blob")));
+        auto b = to_digest(r.text("blob"));
+        if (!b) {
+            return unexpected{fmt::format("the database {}: {}", path_.string(),
+                                          b.error())};
+        }
+        out.push_back(*b);
     }
     return out;
 }
@@ -317,7 +341,7 @@ object_db::remove(const oci::digest& d) {
 
 namespace {
 
-util::expected<std::map<std::string, std::string>, std::string>
+util::expected<std::map<name, std::string>, std::string>
 read_meta(util::sqlite::database& db, const char* table, const char* col,
           const std::string& d) {
     auto rows = db.query(
@@ -325,24 +349,69 @@ read_meta(util::sqlite::database& db, const char* table, const char* col,
     if (!rows) {
         return unexpected{rows.error()};
     }
-    std::map<std::string, std::string> m;
+    std::map<name, std::string> m;
     for (auto& r : *rows) {
-        m[r.text("key")] = r.text("value");
+        auto key = name::parse(r.text("key"));
+        if (!key) {
+            return unexpected{fmt::format("the meta key {}", key.error())};
+        }
+        m[*key] = r.text("value");
     }
     return m;
 }
 
-config config_of_row(const util::sqlite::row& r) {
-    return config{.name = r.text("name"),
-                  .version = r.text("version"),
-                  .release = r.text("release"),
-                  .description = r.text("description")};
+// the shared fields of a row of images or layers, and its meta
+util::expected<config, std::string>
+config_of_row(const util::sqlite::row& r, std::map<name, std::string> meta) {
+    auto n = name::parse(r.text("name"));
+    if (!n) {
+        return unexpected{fmt::format("the name {}", n.error())};
+    }
+    auto opt = [&](const char* col) -> util::expected<std::optional<name>, std::string> {
+        const auto text = r.text(col);
+        if (text.empty()) {
+            return std::optional<name>{};
+        }
+        auto v = name::parse(text);
+        if (!v) {
+            return unexpected{fmt::format("the {} {}", col, v.error())};
+        }
+        return std::optional<name>{*v};
+    };
+    auto version = opt("version");
+    if (!version) {
+        return unexpected{version.error()};
+    }
+    auto release = opt("release");
+    if (!release) {
+        return unexpected{release.error()};
+    }
+    return config{.name = *n,
+                  .version = *version,
+                  .release = *release,
+                  .description = r.text("description"),
+                  .meta = std::move(meta)};
+}
+
+util::expected<mount_point, std::string> mount_of_row(const util::sqlite::row& r,
+                                                      const char* col) {
+    auto m = mount_point::parse(r.text(col));
+    if (!m) {
+        return unexpected{m.error()};
+    }
+    return *m;
 }
 
 } // namespace
 
 util::expected<std::optional<object_record>, std::string>
 object_db::get(const oci::digest& d) {
+    // a row that does not parse: the database is damaged
+    auto bad = [&](const std::string& why) {
+        return unexpected{fmt::format("the database {} has an invalid record for "
+                                      "{}: {}",
+                                      path_.string(), d.string(), why)};
+    };
     const auto ds = d.string();
     auto img = db_.query("SELECT * FROM images WHERE digest = ?", {ds});
     if (!img) {
@@ -351,16 +420,14 @@ object_db::get(const oci::digest& d) {
     std::optional<object_record> out;
     if (!img->empty()) {
         auto& row = img->front();
-        object_record r{.kind = format::object_kind::image, .digest = d};
-        r.id = row.text("id");
-        r.cfg = config_of_row(row);
-        r.added = row.text("added");
-        r.size = row.integer("size");
         auto meta = read_meta(db_, "image_meta", "image", ds);
         if (!meta) {
-            return unexpected{meta.error()};
+            return bad(meta.error());
         }
-        r.cfg.meta = *meta;
+        auto cfg = config_of_row(row, std::move(*meta));
+        if (!cfg) {
+            return bad(cfg.error());
+        }
         auto layers = db_.query(
             "SELECT il.alias AS alias, il.mount AS imount, l.* FROM "
             "image_layers il JOIN layers l ON il.layer = l.digest WHERE "
@@ -369,61 +436,89 @@ object_db::get(const oci::digest& d) {
         if (!layers) {
             return unexpected{layers.error()};
         }
+        std::vector<layer_ref> refs;
         for (auto& lr : *layers) {
-            layer_ref ref{.alias = lr.text("alias"),
-                          .mount = lr.text("imount"),
-                          .digest = to_digest(lr.text("digest")),
-                          .cfg = config_of_row(lr),
-                          .build_mount = lr.text("mount"),
-                          .relocatable = lr.integer("relocatable") != 0,
-                          .squashfs = to_digest(lr.text("squashfs")),
-                          .squashfs_size =
-                              std::uint64_t(lr.integer("squashfs_size"))};
+            auto alias = name::parse(lr.text("alias"));
+            auto mount = mount_of_row(lr, "imount");
+            auto build_mount = mount_of_row(lr, "mount");
+            auto digest = to_digest(lr.text("digest"));
+            auto squashfs = to_digest(lr.text("squashfs"));
             auto lm = read_meta(db_, "layer_meta", "layer", lr.text("digest"));
-            if (!lm) {
-                return unexpected{lm.error()};
+            if (!alias || !mount || !build_mount || !digest || !squashfs || !lm) {
+                return bad(!alias      ? alias.error()
+                           : !mount    ? mount.error()
+                           : !build_mount ? build_mount.error()
+                           : !digest   ? digest.error()
+                           : !squashfs ? squashfs.error()
+                                       : lm.error());
             }
-            ref.cfg.meta = *lm;
-            r.layers.push_back(std::move(ref));
+            auto lcfg = config_of_row(lr, std::move(*lm));
+            if (!lcfg) {
+                return bad(lcfg.error());
+            }
+            refs.push_back(layer_ref{
+                .alias = *alias,
+                .mount = *mount,
+                .digest = *digest,
+                .cfg = std::move(*lcfg),
+                .build_mount = *build_mount,
+                .relocatable = lr.integer("relocatable") != 0,
+                .squashfs = *squashfs,
+                .squashfs_size = std::uint64_t(lr.integer("squashfs_size"))});
         }
-        out = std::move(r);
+        out = object_record{.kind = format::object_kind::image,
+                            .digest = d,
+                            .id = row.text("id"),
+                            .cfg = std::move(*cfg),
+                            .added = row.text("added"),
+                            .size = std::uint64_t(row.integer("size")),
+                            .layers = std::move(refs)};
     } else {
-        auto lay = db_.query(
-            "SELECT l.*, s.added AS sadded, s.size AS ssize FROM layers l LEFT "
-            "JOIN standalone_layers s ON s.layer = l.digest WHERE l.digest = ?",
-            {ds});
-        if (!lay) {
-            return unexpected{lay.error()};
-        }
-        if (lay->empty()) {
-            return std::optional<object_record>{};
-        }
-        auto& row = lay->front();
-        object_record r{.kind = format::object_kind::layer, .digest = d};
-        r.id = row.text("id");
-        r.cfg = config_of_row(row);
-        auto lm = read_meta(db_, "layer_meta", "layer", ds);
-        if (!lm) {
-            return unexpected{lm.error()};
-        }
-        r.cfg.meta = *lm;
-        r.standalone = row.opt_text("sadded").has_value();
-        r.added = row.opt_text("sadded").value_or("");
-        r.mount = row.text("mount");
-        r.relocatable = row.integer("relocatable") != 0;
-        r.squashfs = to_digest(row.text("squashfs"));
-        r.size = r.standalone ? row.integer("ssize")
-                              : row.integer("squashfs_size");
-        r.layers.push_back(layer_ref{.alias = r.cfg.name,
-                                     .mount = r.mount,
-                                     .digest = d,
-                                     .cfg = r.cfg,
-                                     .build_mount = r.mount,
-                                     .relocatable = r.relocatable,
-                                     .squashfs = *r.squashfs,
-                                     .squashfs_size = std::uint64_t(
-                                         row.integer("squashfs_size"))});
-        out = std::move(r);
+    auto lay = db_.query(
+        "SELECT l.*, s.added AS sadded, s.size AS ssize FROM layers l LEFT "
+        "JOIN standalone_layers s ON s.layer = l.digest WHERE l.digest = ?",
+        {ds});
+    if (!lay) {
+        return unexpected{lay.error()};
+    }
+    if (lay->empty()) {
+        return std::optional<object_record>{};
+    }
+    auto& row = lay->front();
+    auto lm = read_meta(db_, "layer_meta", "layer", ds);
+    if (!lm) {
+        return bad(lm.error());
+    }
+    auto cfg = config_of_row(row, std::move(*lm));
+    auto mount = mount_of_row(row, "mount");
+    auto squashfs = to_digest(row.text("squashfs"));
+    if (!cfg || !mount || !squashfs) {
+        return bad(!cfg ? cfg.error() : !mount ? mount.error() : squashfs.error());
+    }
+    const bool standalone = row.opt_text("sadded").has_value();
+    const bool relocatable = row.integer("relocatable") != 0;
+    const auto squashfs_size = std::uint64_t(row.integer("squashfs_size"));
+    std::vector<layer_ref> self{layer_ref{.alias = cfg->name,
+                                          .mount = *mount,
+                                          .digest = d,
+                                          .cfg = *cfg,
+                                          .build_mount = *mount,
+                                          .relocatable = relocatable,
+                                          .squashfs = *squashfs,
+                                          .squashfs_size = squashfs_size}};
+    object_record r{
+        .kind = format::object_kind::layer,
+        .digest = d,
+        .id = row.text("id"),
+        .cfg = std::move(*cfg),
+        .added = row.opt_text("sadded").value_or(""),
+        .size = standalone ? std::uint64_t(row.integer("ssize")) : squashfs_size,
+        .layers = std::move(self),
+        .standalone = standalone,
+        .mount = *mount,
+        .relocatable = relocatable,
+        .squashfs = *squashfs};
+    out = std::move(r);
     }
     auto loc = db_.query(
         "SELECT repository, tag FROM locations WHERE object = ? LIMIT 1", {ds});
@@ -483,7 +578,12 @@ object_db::query(const label_query& q) {
     }
     std::vector<object_record> out;
     for (auto& r : *rows) {
-        auto rec = get(to_digest(r.text("digest")));
+        auto key = to_digest(r.text("digest"));
+        if (!key) {
+            return unexpected{fmt::format("the database {}: {}", path_.string(),
+                                          key.error())};
+        }
+        auto rec = get(*key);
         if (!rec) {
             return unexpected{rec.error()};
         }
@@ -504,7 +604,12 @@ util::expected<std::vector<object_record>, std::string> object_db::all() {
         return unexpected{rows.error()};
     }
     for (auto& r : *rows) {
-        auto rec = get(to_digest(r.text("layer")));
+        auto key = to_digest(r.text("layer"));
+        if (!key) {
+            return unexpected{fmt::format("the database {}: {}", path_.string(),
+                                          key.error())};
+        }
+        auto rec = get(*key);
         if (!rec) {
             return unexpected{rec.error()};
         }
@@ -525,7 +630,12 @@ object_db::images_with_layer(const oci::digest& layer) {
     }
     std::vector<object_record> out;
     for (auto& r : *rows) {
-        auto rec = get(to_digest(r.text("image")));
+        auto key = to_digest(r.text("image"));
+        if (!key) {
+            return unexpected{fmt::format("the database {}: {}", path_.string(),
+                                          key.error())};
+        }
+        auto rec = get(*key);
         if (!rec) {
             return unexpected{rec.error()};
         }
@@ -803,31 +913,42 @@ store::load(const oci::digest& d) const {
     return format::load_composed_image(d, *body, reader(), locator());
 }
 
-object_record record_of(const composed_image& img, std::uint64_t size) {
-    object_record r{.kind = img.kind == uenv::image_kind::layer ? format::object_kind::layer
-                                         : format::object_kind::image,
-                    .digest = *img.digest};
-    r.id = format::short_id(*img.digest);
-    r.cfg = img.config;
-    r.added = now_utc();
-    r.size = size;
+util::expected<object_record, std::string>
+record_of(const composed_image& img, std::uint64_t size) {
+    // only an object that a store holds has a record: each digest is set
+    if (!img.digest) {
+        return unexpected{fmt::format("the {} has no digest: it is not stored",
+                                      img.config.name)};
+    }
+    std::vector<layer_ref> refs;
     for (auto& l : img.layers) {
-        r.layers.push_back(layer_ref{.alias = l.alias,
-                                     .mount = l.mount.string(),
-                                     .digest = *l.layer.digest(),
-                                     .cfg = l.layer.config,
-                                     .build_mount = l.layer.mount.string(),
-                                     .relocatable = l.layer.relocatable,
-                                     .squashfs = *l.layer.store.digest,
-                                     .squashfs_size = l.layer.store.size});
+        if (!l.layer.digest() || !l.layer.store.digest) {
+            return unexpected{fmt::format(
+                "the layer '{}' of {} has no digest: it is not stored", l.alias,
+                img.config.name)};
+        }
+        refs.push_back(layer_ref{.alias = l.alias,
+                                 .mount = l.mount,
+                                 .digest = *l.layer.digest(),
+                                 .cfg = l.layer.config,
+                                 .build_mount = l.layer.mount,
+                                 .relocatable = l.layer.relocatable,
+                                 .squashfs = *l.layer.store.digest,
+                                 .squashfs_size = l.layer.store.size});
     }
-    if (img.kind == uenv::image_kind::layer) {
-        auto& l = img.layers.front().layer;
-        r.mount = l.mount.string();
-        r.relocatable = l.relocatable;
-        r.squashfs = l.store.digest;
-    }
-    return r;
+    const bool is_layer = img.kind == uenv::image_kind::layer;
+    const auto& front = img.layers.front().layer;
+    return object_record{
+        .kind = is_layer ? format::object_kind::layer : format::object_kind::image,
+        .digest = *img.digest,
+        .id = format::short_id(*img.digest),
+        .cfg = img.config,
+        .added = now_utc(),
+        .size = size,
+        .layers = std::move(refs),
+        .mount = is_layer ? std::optional<mount_point>{front.mount} : std::nullopt,
+        .relocatable = is_layer && front.relocatable,
+        .squashfs = is_layer ? front.store.digest : std::nullopt};
 }
 
 util::expected<object_record, std::string>
@@ -843,19 +964,39 @@ store::record(const oci::digest& top, bool standalone_layer) {
     // the blobs that the object reaches
     std::vector<oci::digest> blobs{top};
     if (img->kind != uenv::image_kind::layer) {
-        auto idx = format::parse_index(*read_blob(top));
+        auto body = read_blob(top);
+        auto idx = body ? format::parse_index(*body)
+                        : util::expected<format::image_index, format::error>{
+                              unexpected{body.error()}};
+        if (!idx) {
+            return unexpected{idx.error()};
+        }
         blobs.push_back(idx->wrapper.digest);
-        auto w = format::parse_wrapper_manifest(*read_blob(idx->wrapper.digest));
+        auto wbody = read_blob(idx->wrapper.digest);
+        auto w = wbody ? format::parse_wrapper_manifest(*wbody)
+                       : util::expected<format::wrapper_manifest, format::error>{
+                             unexpected{wbody.error()}};
+        if (!w) {
+            return unexpected{w.error()};
+        }
         blobs.push_back(w->config.digest);
-        blobs.push_back(*oci::digest::parse(
-            fmt::format("sha256:{}", oci::empty_config_hex)));
+        blobs.push_back(format::empty_config_digest());
     }
     for (auto& l : img->layers) {
-        auto m = format::parse_layer_manifest(*read_blob(*l.layer.digest()));
+        // a loaded layer has a digest
+        auto d = l.layer.digest();
+        if (!d) {
+            return unexpected{fmt::format("the layer '{}' has no digest", l.alias)};
+        }
+        auto body = read_blob(*d);
+        if (!body) {
+            return unexpected{body.error()};
+        }
+        auto m = format::parse_layer_manifest(*body);
         if (!m) {
             return unexpected{m.error()};
         }
-        blobs.push_back(*l.layer.digest());
+        blobs.push_back(*d);
         blobs.push_back(m->config.digest);
         blobs.push_back(m->squashfs.digest);
     }
@@ -876,12 +1017,15 @@ store::record(const oci::digest& top, bool standalone_layer) {
         unique.push_back(b);
     }
     auto r = record_of(*img, size);
-    r.standalone = standalone_layer && img->kind == uenv::image_kind::layer;
+    if (!r) {
+        return unexpected{r.error()};
+    }
+    r->standalone = standalone_layer && img->kind == uenv::image_kind::layer;
     test_fault("record-before-db");
-    if (auto x = db_.add(r, unique); !x) {
+    if (auto x = db_.add(*r, unique); !x) {
         return unexpected{x.error()};
     }
-    return r;
+    return *r;
 }
 
 util::expected<std::vector<oci::digest>, std::string>

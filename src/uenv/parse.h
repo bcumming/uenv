@@ -38,11 +38,12 @@ util::expected<std::filesystem::path, std::string>
 parse_file_path(std::string_view in);
 
 // "alias:view": the stored form of a reference to a layer view
-util::expected<layer_view_ref, parse_error>
+util::expected<layer_view_ref, std::string>
 parse_layer_view_ref(const std::string& in);
 
-// the name of a view in a config: a name with no alias
-util::expected<std::string, parse_error> parse_view_name(const std::string& in);
+// "[item:]view,...": the views that a user names (--view, UENV_VIEW)
+util::expected<std::vector<view_request>, std::string>
+parse_view_requests(const std::string& in);
 
 util::expected<std::vector<uenv_description>, parse_error>
 parse_uenv_args(const std::string& arg);

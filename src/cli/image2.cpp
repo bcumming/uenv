@@ -44,7 +44,19 @@ std::string meta_string(const config& c) {
 }
 
 std::string label_of(const config& c) {
-    return fmt::format("{}/{}:{}", c.name, c.version, c.release);
+    return label_string(c);
+}
+
+json meta_json(const std::map<uenv::name, std::string>& meta) {
+    json j = json::object();
+    for (auto& [k, v] : meta) {
+        j[k.string()] = v;
+    }
+    return j;
+}
+
+json name_json(const std::optional<uenv::name>& n) {
+    return n ? json(n->string()) : json(nullptr);
 }
 
 std::string size_string(std::uint64_t b) {
@@ -60,18 +72,18 @@ std::string size_string(std::uint64_t b) {
 json record_to_json(const object_record& r) {
     json layers = json::array();
     for (auto& l : r.layers) {
-        layers.push_back({{"alias", l.alias},
-                          {"mount", l.mount},
+        layers.push_back({{"alias", l.alias.string()},
+                          {"mount", l.mount.string()},
                           {"digest", l.digest.string()},
                           {"label", label_of(l.cfg)},
-                          {"meta", l.cfg.meta}});
+                          {"meta", meta_json(l.cfg.meta)}});
     }
     json j{{"kind", r.kind == format::object_kind::image ? "image" : "layer"},
            {"label", label_of(r.cfg)},
-           {"name", r.cfg.name},
-           {"version", r.cfg.version},
-           {"release", r.cfg.release},
-           {"meta", r.cfg.meta},
+           {"name", r.cfg.name.string()},
+           {"version", name_json(r.cfg.version)},
+           {"release", name_json(r.cfg.release)},
+           {"meta", meta_json(r.cfg.meta)},
            {"id", r.id},
            {"digest", r.digest.string()},
            {"size", r.size},
@@ -107,7 +119,7 @@ void print_records(const std::vector<object_record>& records, bool json_out,
         } else {
             std::vector<std::string> ls;
             for (auto& l : r.layers) {
-                ls.push_back(l.alias);
+                ls.push_back(l.alias.string());
             }
             extra = fmt::format("{}", fmt::join(ls, ","));
         }
@@ -239,18 +251,29 @@ int image_add(const add_args& args, const global_settings& settings) {
         auto c = v1::make_layer_config(
             *m, v1::v1_label{*label->version, *label->tag, label->system,
                              label->uarch});
-        if (c) {
-            c->shared.name = *label->name;
+        if (!c) {
+            return c;
         }
+        // the name of the label, not the name in meta/env.json
+        auto n = uenv::name::parse(*label->name);
+        if (!n) {
+            return util::unexpected{n.error()};
+        }
+        c->shared.name = *n;
         return c;
     }();
     if (!cfg) {
         term::error("{}", cfg.error());
         return 1;
     }
-    std::map<std::string, std::string> image_meta;
+    std::map<uenv::name, std::string> image_meta;
     if (label->system) {
-        image_meta[settings.config.label.at] = *label->system;
+        auto key = uenv::name::parse(settings.config.label.at);
+        if (!key) {
+            term::error("the setting label.at: {}", key.error());
+            return 1;
+        }
+        image_meta[*key] = *label->system;
     }
     auto r = add_squashfs(*s, sqfs, *cfg, image_meta, as_layer);
     if (!r) {
@@ -337,15 +360,15 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
     for (auto& l : img->layers) {
         json views = json::object();
         for (auto& [k, v] : l.layer.views) {
-            views[k] = env_json_of(v.env);
+            views[k.string()] = env_json_of(v.env);
         }
         layers.push_back(
-            {{"alias", l.alias},
+            {{"alias", l.alias.string()},
              {"mount", l.mount.string()},
              {"build_mount", l.layer.mount.string()},
              {"relocatable", l.layer.relocatable},
              {"label", label_of(l.layer.config)},
-             {"meta", l.layer.config.meta},
+             {"meta", meta_json(l.layer.config.meta)},
              {"digest", l.layer.digest() ? l.layer.digest()->string() : ""},
              {"squashfs", l.layer.store.file ? l.layer.store.file->string() : ""},
              {"views", views}});
@@ -369,7 +392,7 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
     json j{{"kind", kind},
            {"label", label_of(img->config)},
            {"description", img->config.description},
-           {"meta", img->config.meta},
+           {"meta", meta_json(img->config.meta)},
            {"digest", img->digest ? img->digest->string() : ""},
            {"layers", layers},
            {"views", views},

@@ -181,29 +181,54 @@ make_client(const target& t, const std::string& repository, context& ctx) {
 namespace {
 
 json config_json(const config& c) {
-    return json{{"name", c.name},
-                {"version", c.version},
-                {"release", c.release},
+    json meta = json::object();
+    for (auto& [k, v] : c.meta) {
+        meta[k.string()] = v;
+    }
+    return json{{"name", c.name.string()},
+                {"version", c.version ? c.version->string() : ""},
+                {"release", c.release ? c.release->string() : ""},
                 {"description", c.description},
-                {"meta", c.meta}};
+                {"meta", meta}};
+}
+
+// The catalogue is a choice of the spike, and is not designed yet: it keeps
+// its own error handling. A value that does not parse makes the event
+// invalid (record_from catches it).
+template <typename T> T parsed(util::expected<T, std::string> e) {
+    if (!e) {
+        throw std::runtime_error(e.error());
+    }
+    return std::move(*e);
 }
 
 config config_from(const json& j) {
-    return config{.name = j.value("name", ""),
-                  .version = j.value("version", ""),
-                  .release = j.value("release", ""),
+    std::map<name, std::string> meta;
+    for (auto& [k, v] : j.value("meta", std::map<std::string, std::string>{})) {
+        meta[parsed(name::parse(k))] = v;
+    }
+    auto opt = [&](const char* key) -> std::optional<name> {
+        auto text = j.value(key, std::string{});
+        if (text.empty()) {
+            return std::nullopt;
+        }
+        return parsed(name::parse(text));
+    };
+    return config{.name = parsed(name::parse(j.value("name", std::string{}))),
+                  .version = opt("version"),
+                  .release = opt("release"),
                   .description = j.value("description", ""),
-                  .meta = j.value("meta", std::map<std::string, std::string>{})};
+                  .meta = std::move(meta)};
 }
 
 json record_json(const object_record& r) {
     json layers = json::array();
     for (auto& l : r.layers) {
-        layers.push_back(json{{"alias", l.alias},
-                              {"mount", l.mount},
+        layers.push_back(json{{"alias", l.alias.string()},
+                              {"mount", l.mount.string()},
                               {"digest", l.digest.string()},
                               {"config", config_json(l.cfg)},
-                              {"build_mount", l.build_mount},
+                              {"build_mount", l.build_mount.string()},
                               {"relocatable", l.relocatable},
                               {"squashfs", l.squashfs.string()},
                               {"squashfs_size", l.squashfs_size}});
@@ -214,7 +239,7 @@ json record_json(const object_record& r) {
            {"size", r.size},
            {"layers", layers}};
     if (r.kind == format::object_kind::layer) {
-        j["mount"] = r.mount;
+        j["mount"] = r.mount ? r.mount->string() : "";
         j["relocatable"] = r.relocatable;
         j["squashfs"] = r.squashfs->string();
     }
@@ -230,25 +255,28 @@ util::expected<object_record, std::string> record_from(const json& j) {
         object_record r{.kind = j.at("kind") == "image"
                                     ? format::object_kind::image
                                     : format::object_kind::layer,
-                        .digest = *d};
-        r.id = format::short_id(*d);
-        r.cfg = config_from(j.at("config"));
-        r.size = j.value("size", std::uint64_t(0));
-        r.added = now_utc();
+                        .digest = *d,
+                        .id = format::short_id(*d),
+                        .cfg = config_from(j.at("config")),
+                        .added = now_utc(),
+                        .size = j.value("size", std::uint64_t(0))};
+        auto mount = [](const json& m) {
+            return parsed(mount_point::parse(m.get<std::string>()));
+        };
         for (auto& l : j.at("layers")) {
             r.layers.push_back(layer_ref{
-                .alias = l.at("alias"),
-                .mount = l.at("mount"),
+                .alias = parsed(name::parse(l.at("alias").get<std::string>())),
+                .mount = mount(l.at("mount")),
                 .digest = *oci::digest::parse(l.at("digest").get<std::string>()),
                 .cfg = config_from(l.at("config")),
-                .build_mount = l.at("build_mount"),
+                .build_mount = mount(l.at("build_mount")),
                 .relocatable = l.at("relocatable"),
                 .squashfs =
                     *oci::digest::parse(l.at("squashfs").get<std::string>()),
                 .squashfs_size = l.at("squashfs_size")});
         }
         if (r.kind == format::object_kind::layer) {
-            r.mount = j.at("mount");
+            r.mount = mount(j.at("mount"));
             r.relocatable = j.at("relocatable");
             r.squashfs = *oci::digest::parse(j.at("squashfs").get<std::string>());
             r.standalone = true;
@@ -550,8 +578,7 @@ catalogue::find(const std::string& text) {
             for (auto& [k, v] : rec.cfg.meta) {
                 meta.push_back(fmt::format("{}={}", k, v));
             }
-            lines.push_back(fmt::format("  {}/{}:{} {} id={}", rec.cfg.name,
-                                        rec.cfg.version, rec.cfg.release,
+            lines.push_back(fmt::format("  {} {} id={}", label_string(rec.cfg),
                                         fmt::join(meta, ","), rec.id));
         }
         return unexpected{fmt::format(
@@ -846,7 +873,7 @@ void append_event(const target& t, const std::string& op,
 // and each repository that the catalogue knows
 std::vector<std::string> layer_candidates(const target& t, const layer& l,
                                           context& ctx) {
-    std::vector<std::string> out{t.repo(l.config.name)};
+    std::vector<std::string> out{t.repo(l.config.name.string())};
     if (auto cat = catalogue::open(t, ctx)) {
         if (auto repos = cat->repositories_with_layer(*l.digest())) {
             for (auto& r : *repos) {
@@ -877,7 +904,7 @@ push(store& s, const oci::digest& object, const target& t, context& ctx) {
     }
     const bool is_layer = img->kind == uenv::image_kind::layer;
     const auto& cfg = is_layer ? img->layers.front().layer.config : img->config;
-    const auto repository = t.repo(cfg.name);
+    const auto repository = t.repo(cfg.name.string());
     const auto tag = format::make_tag(cfg, object);
     auto dst = open_repo(t, repository, ctx);
     if (!dst) {
@@ -1046,8 +1073,7 @@ push_layout(const fs::path& dir, const target& t, context& ctx) {
                                           l.layer.store.digest->string())};
         }
     }
-    if (!s->has_blob(*oci::digest::parse(
-            fmt::format("sha256:{}", oci::empty_config_hex)))) {
+    if (!s->has_blob(format::empty_config_digest())) {
         (void)s->put_bytes(format::make_blob(std::string(oci::empty_config_body)));
     }
     if (auto r = s->record(*d, img->kind == uenv::image_kind::layer); !r) {
@@ -1121,19 +1147,24 @@ util::expected<object_record, std::string> pull(store& s, const address& a,
         auto q = parse_label_query(*a.label, ctx.keys, ctx.default_system);
         if (q && !q->id) {
             const auto& c = img->config;
+            auto text = [](const std::optional<name>& n) {
+                return n ? n->string() : std::string{};
+            };
             std::vector<std::string> bad;
-            if (q->name && *q->name != c.name) {
-                bad.push_back("name " + c.name);
+            if (q->name && *q->name != c.name.string()) {
+                bad.push_back("name " + c.name.string());
             }
-            if (q->version && *q->version != c.version) {
-                bad.push_back("version " + c.version);
+            if (q->version && *q->version != text(c.version)) {
+                bad.push_back("version " + text(c.version));
             }
-            if (q->release && *q->release != c.release) {
-                bad.push_back("release " + c.release);
+            if (q->release && *q->release != text(c.release)) {
+                bad.push_back("release " + text(c.release));
             }
             for (auto& [k, v] : q->meta) {
-                if (auto it = c.meta.find(k); it != c.meta.end() && it->second != v) {
-                    bad.push_back(fmt::format("{} {}", k, it->second));
+                for (auto& [ck, cv] : c.meta) {
+                    if (ck.string() == k && cv != v) {
+                        bad.push_back(fmt::format("{} {}", k, cv));
+                    }
                 }
             }
             if (!bad.empty()) {
@@ -1258,7 +1289,10 @@ copy(const address& srca, const target& dstt, context& ctx,
 
     std::string tag;
     oci::digest result = loc->digest;
-    object_record rec = record_of(*img, 0);
+    auto rec = record_of(*img, 0);
+    if (!rec) {
+        return unexpected{rec.error()};
+    }
     if (*kind == format::object_kind::layer) {
         tag = loc->tag.value_or(format::make_tag(img->config, loc->digest));
         if (auto x = check_tag(*dst, tag, loc->digest); !x) {
@@ -1269,7 +1303,7 @@ copy(const address& srca, const target& dstt, context& ctx,
             !r) {
             return unexpected{r.error()};
         }
-        rec.standalone = true;
+        rec->standalone = true;
     } else if (changes.empty()) {
         // a copy with no change: the same objects, the same digest
         auto idx = format::parse_index(top->body);
@@ -1300,19 +1334,27 @@ copy(const address& srca, const target& dstt, context& ctx,
         // a copy with a change is a compose with one change
         auto changed = *img;
         for (auto& [k, v] : changes) {
-            if (k == "release") {
-                changed.config.release = v;
-            } else if (k == "version") {
-                changed.config.version = v;
+            if (k == "release" || k == "version") {
+                auto n = name::parse(v);
+                if (!n) {
+                    return unexpected{fmt::format("--set {}: {}", k, n.error())};
+                }
+                (k == "release" ? changed.config.release : changed.config.version) =
+                    *n;
             } else if (k == "name") {
                 return unexpected{std::string{
                     "a copy cannot change the name: the name gives the "
                     "repository"}};
             } else if (k.starts_with("meta.")) {
+                auto key = name::parse(k.substr(5));
+                if (!key) {
+                    return unexpected{
+                        fmt::format("--set {}: the meta key {}", k, key.error())};
+                }
                 if (v.empty()) {
-                    changed.config.meta.erase(k.substr(5));
+                    changed.config.meta.erase(*key);
                 } else {
-                    changed.config.meta[k.substr(5)] = v;
+                    changed.config.meta[*key] = v;
                 }
             } else {
                 return unexpected{fmt::format("a copy cannot change '{}'", k)};
@@ -1348,6 +1390,9 @@ copy(const address& srca, const target& dstt, context& ctx,
             return unexpected{r.error()};
         }
         rec = record_of(changed, 0);
+        if (!rec) {
+            return unexpected{rec.error()};
+        }
     }
 
     // the referrers
@@ -1371,7 +1416,7 @@ copy(const address& srca, const target& dstt, context& ctx,
             }
         }
     }
-    append_event(dstt, "add", dst->repository, tag, rec, ctx);
+    append_event(dstt, "add", dst->repository, tag, *rec, ctx);
     return push_result{dst->repository, tag, result};
 }
 

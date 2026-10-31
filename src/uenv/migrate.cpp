@@ -13,6 +13,7 @@
 #include <uenv/format.h>
 #include <uenv/meta.h>
 #include <uenv/migrate.h>
+#include <uenv/name.h>
 #include <uenv/ops.h>
 #include <uenv/repository.h>
 #include <uenv/store.h>
@@ -135,22 +136,52 @@ migrate_v1(const fs::path& root, migrate_options opts,
             report.errors.push_back(fmt::format("{}: {}", label, c.error()));
             continue;
         }
+        auto fail = [&](const std::string& why) {
+            report.failed++;
+            report.errors.push_back(fmt::format("{}: {}", label, why));
+        };
         auto cfg = std::move(*c);
-        cfg.shared.name = r.name;
-        storage store{.size = fs::file_size(paths.squashfs), .digest = *sqfs};
+        // the name of the v1 record, not the name in meta/env.json
+        auto record_name = name::parse(r.name);
+        if (!record_name) {
+            fail(record_name.error());
+            continue;
+        }
+        cfg.shared.name = *record_name;
+        std::error_code ec;
+        const auto size = fs::file_size(paths.squashfs, ec);
+        if (ec) {
+            fail(fmt::format("unable to read {}: {}", paths.squashfs.string(),
+                             ec.message()));
+            continue;
+        }
+        storage store{.size = size, .digest = *sqfs};
         auto lo = format::make_layer_objects(cfg, store);
         if (!lo) {
-            report.failed++;
-            report.errors.push_back(fmt::format("{}: {}", label, lo.error()));
+            fail(lo.error());
             continue;
         }
         const auto l = layer::make(
             cfg, std::move(store),
             format::layer_descriptor(lo->manifest.digest, lo->manifest.size()));
-        auto img = raise_layer(l, std::nullopt, false);
+        if (!l) {
+            fail(l.error());
+            continue;
+        }
+        auto system_key = name::parse("system");
+        auto uarch_key = name::parse("uarch");
+        if (!system_key || !uarch_key) {
+            fail("the meta keys system and uarch are not names");
+            continue;
+        }
+        auto img = raise_layer(*l, std::nullopt, false);
+        if (!img) {
+            fail(img.error());
+            continue;
+        }
         img->kind = uenv::image_kind::image;
-        img->config.meta["system"] = r.system;
-        img->config.meta["uarch"] = r.uarch;
+        img->config.meta[*system_key] = r.system;
+        img->config.meta[*uarch_key] = r.uarch;
         auto objs = format::make_image_objects(*img);
         if (!objs) {
             report.failed++;

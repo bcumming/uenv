@@ -84,14 +84,14 @@ parse_item_list(const std::string& text, const label_keys& keys,
         }
         item_spec item{.text = word};
         // [alias=]
-        if (auto eq = word.find('='); eq != std::string::npos && eq > 0) {
-            auto alias = word.substr(0, eq);
-            if (std::all_of(alias.begin(), alias.end(), [](unsigned char c) {
-                    return std::isalnum(c) || c == '_' || c == '-' || c == '.';
-                })) {
-                item.alias = alias;
-                word = word.substr(eq + 1);
+        if (auto eq = word.find('='); eq != std::string::npos) {
+            auto alias = name::parse(word.substr(0, eq));
+            if (!alias) {
+                return unexpected{fmt::format("invalid item '{}': the alias {}",
+                                              item.text, alias.error())};
             }
+            item.alias = *alias;
+            word = word.substr(eq + 1);
         }
         bool layer = !word.empty() && word[0] == '+';
         auto rest = layer ? word.substr(1) : word;
@@ -136,28 +136,62 @@ namespace v1 {
 
 util::expected<layer_config, std::string>
 make_layer_config(const uenv::meta& m, const std::optional<v1_label>& label) {
+    // the v1 data enters the new model here: parse each field
+    auto field = [](std::string_view what, const std::string& text)
+        -> util::expected<uenv::name, std::string> {
+        auto n = uenv::name::parse(text);
+        if (!n) {
+            return unexpected{fmt::format("meta/env.json: the {} {}", what, n.error())};
+        }
+        return n;
+    };
     auto mount = mount_point::parse(m.mount);
     if (!mount) {
         return unexpected{fmt::format("meta/env.json: {}", mount.error())};
     }
-    config shared{.name = m.name, .description = m.description.value_or("")};
+    auto n = field("name", m.name);
+    if (!n) {
+        return unexpected{n.error()};
+    }
+    config shared{.name = *n, .description = m.description.value_or("")};
     if (label) {
-        shared.version = label->version;
-        shared.release = label->release;
+        auto version = field("version", label->version);
+        if (!version) {
+            return unexpected{version.error()};
+        }
+        auto release = field("release", label->release);
+        if (!release) {
+            return unexpected{release.error()};
+        }
+        shared.version = *version;
+        shared.release = *release;
         if (label->uarch) {
-            shared.meta["uarch"] = *label->uarch;
+            auto key = field("meta key", "uarch");
+            if (!key) {
+                return unexpected{key.error()};
+            }
+            shared.meta[*key] = *label->uarch;
         }
     }
-    std::map<std::string, layer_view> views;
-    for (auto& [name, v] : m.views) {
-        views[name] =
+    std::map<uenv::name, layer_view> views;
+    for (auto& [vname, v] : m.views) {
+        auto key = field("view name", vname);
+        if (!key) {
+            return unexpected{key.error()};
+        }
+        views[*key] =
             layer_view{.description = v.description, .env = v.environment};
     }
-    return layer_config{.shared = std::move(shared),
-                        .mount = std::move(*mount),
-                        .relocatable = false,
-                        .views = std::move(views),
-                        .default_view = m.default_view};
+    std::optional<uenv::name> default_view;
+    if (m.default_view) {
+        auto d = field("default view", *m.default_view);
+        if (!d) {
+            return unexpected{d.error()};
+        }
+        default_view = *d;
+    }
+    return layer_config::make(std::move(shared), std::move(*mount), false,
+                              std::move(views), std::move(default_view));
 }
 
 } // namespace v1
@@ -206,8 +240,15 @@ raise_from_squashfs(const fs::path& sqfs, std::optional<mount_point> mount) {
                 "{}:/user-environment",
                 sqfs.string(), sqfs.string())};
         }
-        return layer_config{.shared = {.name = sqfs.stem().string()},
-                            .mount = *mount};
+        // the name of the file, if it is a name
+        auto n = uenv::name::parse(sqfs.stem().string());
+        if (!n) {
+            n = uenv::name::parse("unnamed");
+        }
+        if (!n) {
+            return unexpected{n.error()};
+        }
+        return layer_config{.shared = {.name = *n}, .mount = *mount};
     }();
     if (!cfg) {
         return unexpected{cfg.error()};
@@ -218,9 +259,17 @@ raise_from_squashfs(const fs::path& sqfs, std::optional<mount_point> mount) {
         cfg->mount = *mount;
     }
     // a squashfs file is not hashed: it has no digest and no layer manifest
-    storage store{.size = fs::file_size(sqfs, ec), .file = sqfs};
-    return raise_layer(layer::make(std::move(*cfg), std::move(store)),
-                       std::nullopt, false);
+    const auto size = fs::file_size(sqfs, ec);
+    if (ec) {
+        return unexpected{
+            fmt::format("unable to read {}: {}", sqfs.string(), ec.message())};
+    }
+    storage store{.size = size, .file = sqfs};
+    auto l = layer::make(std::move(*cfg), std::move(store));
+    if (!l) {
+        return unexpected{l.error()};
+    }
+    return raise_layer(*l, std::nullopt, false);
 }
 
 util::expected<object_record, std::string>
@@ -241,11 +290,10 @@ write_image(store& s, const composed_image& img) {
 
 util::expected<object_record, std::string>
 add_squashfs(store& s, const fs::path& sqfs, const layer_config& cfg,
-             const std::map<std::string, std::string>& image_meta,
+             const std::map<uenv::name, std::string>& image_meta,
              bool as_layer,
              std::function<void(std::uint64_t, std::uint64_t)> progress) {
-    if (cfg.shared.release.empty() || cfg.shared.version.empty() ||
-        cfg.shared.name.empty()) {
+    if (!cfg.shared.release || !cfg.shared.version) {
         return unexpected{std::string{
             "a layer needs a name, a version and a release, for example "
             "prgenv-gnu/24.11:v1"}};
@@ -257,8 +305,13 @@ add_squashfs(store& s, const fs::path& sqfs, const layer_config& cfg,
     }
     test_fault("add-after-squashfs");
     std::error_code ec;
-    storage store{.size = fs::file_size(s.blob_path(*sqfs_digest), ec),
-                  .digest = *sqfs_digest};
+    const auto size = fs::file_size(s.blob_path(*sqfs_digest), ec);
+    if (ec) {
+        return unexpected{fmt::format("unable to read {}: {}",
+                                      s.blob_path(*sqfs_digest).string(),
+                                      ec.message())};
+    }
+    storage store{.size = size, .digest = *sqfs_digest};
     auto lo = format::make_layer_objects(cfg, store);
     if (!lo) {
         return unexpected{lo.error()};
@@ -271,11 +324,14 @@ add_squashfs(store& s, const fs::path& sqfs, const layer_config& cfg,
     const auto l = layer::make(
         cfg, std::move(store),
         format::layer_descriptor(lo->manifest.digest, lo->manifest.size()));
+    if (!l) {
+        return unexpected{l.error()};
+    }
     if (as_layer) {
         return s.record(lo->manifest.digest, true);
     }
     // 2. promote the layer to an image
-    auto img = raise_layer(l, std::nullopt, false);
+    auto img = raise_layer(*l, std::nullopt, false);
     if (!img) {
         return unexpected{img.error()};
     }
@@ -314,9 +370,8 @@ find_unique(std::vector<store>& stores, const label_query& q,
             for (auto& [k, v] : f.record.cfg.meta) {
                 meta.push_back(fmt::format("{}={}", k, v));
             }
-            lines.push_back(fmt::format("  {}/{}:{} {} id={}", f.record.cfg.name,
-                                        f.record.cfg.version,
-                                        f.record.cfg.release,
+            lines.push_back(fmt::format("  {} {} id={}",
+                                        label_string(f.record.cfg),
                                         fmt::join(meta, ","), f.record.id));
         }
         return unexpected{fmt::format(
@@ -399,7 +454,6 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
         }
         const auto from = e["from"].get<std::string>();
         std::optional<layer> src;
-        std::optional<std::string> source_alias;
         if (auto hash = from.find('#'); hash != std::string::npos) {
             auto q = parse_label_query(from.substr(0, hash), keys);
             if (!q) {
@@ -415,17 +469,21 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
             if (!img) {
                 return unexpected{img.error()};
             }
-            auto alias = from.substr(hash + 1);
+            auto alias = uenv::name::parse(from.substr(hash + 1));
+            if (!alias) {
+                return unexpected{fmt::format(
+                    "the compose file: the layer '{}': the alias {}", from,
+                    alias.error())};
+            }
             for (auto& l : img->layers) {
-                if (l.alias == alias) {
+                if (l.alias == *alias) {
                     src = l.layer;
-                    source_alias = alias;
                 }
             }
             if (!src) {
                 return unexpected{fmt::format(
                     "the image '{}' has no layer '{}'", from.substr(0, hash),
-                    alias)};
+                    *alias)};
             }
         } else {
             auto text = from.starts_with("+") ? from : "+" + from;
@@ -460,9 +518,19 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
             }
             mount = *mp;
         }
-        named_layer nl{.alias = e.value("alias", src->config.name),
-                       .mount = mount,
-                       .layer = *src};
+        auto alias = src->config.name;
+        if (auto a = e.find("alias"); a != e.end()) {
+            auto n = a->is_string()
+                         ? uenv::name::parse(a->get<std::string>())
+                         : util::unexpected{std::string{"'alias' must be a string"}};
+            if (!n) {
+                return unexpected{fmt::format(
+                    "the compose file: the layer '{}': the alias {}", from,
+                    n.error())};
+            }
+            alias = *n;
+        }
+        named_layer nl{.alias = alias, .mount = mount, .layer = *src};
         layers.push_back(std::move(nl));
     }
     auto img = make_composed_image(std::nullopt, ic->shared, std::move(layers),
@@ -481,40 +549,38 @@ resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
               bool force) {
     std::vector<runtime_merge_item> merge;
     for (auto& item : items) {
-        runtime_merge_item m{
-            .alias = item.alias, .mount = item.mount, .force = force};
         if (item.file) {
             auto img = raise_from_squashfs(*item.file, item.mount);
             if (!img) {
                 return unexpected{img.error()};
             }
-            m.image = std::move(*img);
-            m.movable = true;
             // the mount point of a file is already applied
-            m.mount = std::nullopt;
-        } else {
-            auto f = find_unique(stores, *item.query, item.text);
-            if (!f) {
-                return unexpected{f.error()};
-            }
-            auto img = stores[f->store_index].load(f->record.digest);
-            if (!img) {
-                return unexpected{img.error()};
-            }
-            m.image = std::move(*img);
-            m.movable = item.query->layer;
-            if (m.movable && items.size() == 1u && (item.mount || item.alias)) {
-                // a layer started on its own: the mount point is an input
-                // to the raise
-                auto raised = raise_layer(m.image.layers.front().layer,
-                                          item.mount, force, item.alias);
-                if (!raised) {
-                    return unexpected{raised.error()};
-                }
-                return raised;
-            }
+            merge.push_back({.alias = item.alias,
+                             .image = std::move(*img),
+                             .movable = true,
+                             .force = force});
+            continue;
         }
-        merge.push_back(std::move(m));
+        auto f = find_unique(stores, *item.query, item.text);
+        if (!f) {
+            return unexpected{f.error()};
+        }
+        auto img = stores[f->store_index].load(f->record.digest);
+        if (!img) {
+            return unexpected{img.error()};
+        }
+        const bool movable = item.query->layer;
+        if (movable && items.size() == 1u && (item.mount || item.alias)) {
+            // a layer started on its own: the mount point is an input to the
+            // raise
+            return raise_layer(img->layers.front().layer, item.mount, force,
+                               item.alias);
+        }
+        merge.push_back({.alias = item.alias,
+                         .mount = item.mount,
+                         .image = std::move(*img),
+                         .movable = movable,
+                         .force = force});
     }
     return runtime_merge(std::move(merge));
 }

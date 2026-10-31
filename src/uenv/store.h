@@ -26,13 +26,13 @@ inline constexpr std::int64_t store_layout_version = 2;
 void test_fault(std::string_view point);
 
 struct layer_ref {
-    std::string alias;
+    uenv::name alias;
     // the image mount point
-    std::string mount;
+    mount_point mount;
     oci::digest digest;
     config cfg;
     // from the layer config and the layer manifest
-    std::string build_mount;
+    mount_point build_mount;
     bool relocatable = false;
     oci::digest squashfs;
     std::uint64_t squashfs_size = 0;
@@ -51,7 +51,7 @@ struct object_record {
     // layers: true if the layer is on its own (a building block)
     bool standalone = false;
     // layers: the build mount point and relocatable
-    std::string mount;
+    std::optional<mount_point> mount;
     bool relocatable = false;
     std::optional<oci::digest> squashfs;
     // the find database of a registry: where the object is
@@ -103,10 +103,13 @@ class object_db {
     }
 
   private:
-    explicit object_db(util::sqlite::database db) : db_(std::move(db)) {
+    object_db(util::sqlite::database db, std::filesystem::path path)
+        : db_(std::move(db)), path_(std::move(path)) {
     }
     util::expected<void, std::string> init_schema();
     util::sqlite::database db_;
+    // for errors: the file of the database
+    std::filesystem::path path_;
 };
 
 struct update_report {
@@ -212,7 +215,8 @@ enum class repo_layout { none, v1_only, v2, invalid };
 repo_layout inspect_repo(const std::filesystem::path& root);
 
 // make an object_record from a composed_image that was loaded from a store
-object_record record_of(const composed_image& img, std::uint64_t size);
+util::expected<object_record, std::string>
+record_of(const composed_image& img, std::uint64_t size);
 
 std::string now_utc();
 

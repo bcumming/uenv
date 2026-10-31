@@ -106,9 +106,9 @@ json image_config_json() {
 TEST_CASE("2/configs: a layer config round trip", "[config]") {
     auto c = format::parse_layer_config(layer_config_json().dump());
     REQUIRE(c);
-    REQUIRE(c->shared.name == "tools");
+    REQUIRE(c->shared.name == nm("tools"));
     REQUIRE(c->relocatable);
-    REQUIRE(c->shared.meta.at("built-on") == "eiger");
+    REQUIRE(c->shared.meta.at(nm("built-on")) == "eiger");
     auto again = format::parse_layer_config(format::to_json(*c).dump());
     REQUIRE(again);
     REQUIRE(*format::canonical(format::to_json(*again)) ==
@@ -120,7 +120,7 @@ TEST_CASE("2/configs: a layer config round trip", "[config]") {
 TEST_CASE("2/configs: an image config round trip", "[config]") {
     auto c = format::parse_image_config(image_config_json().dump());
     REQUIRE(c);
-    REQUIRE(c->views.at("dev").include.size() == 2u);
+    REQUIRE(c->views.at(nm("dev")).include.size() == 2u);
     REQUIRE(*format::canonical(format::to_json(*c)) ==
             *format::canonical(image_config_json()));
 }
@@ -165,10 +165,10 @@ TEST_CASE("2/configs: view references are parsed", "[config]") {
     // an include entry is parsed into the alias and the view
     auto c = format::parse_image_config(image_config_json().dump());
     REQUIRE(c);
-    REQUIRE(c->views.at("dev").include ==
+    REQUIRE(c->views.at(nm("dev")).include ==
             refs({"prgenv-gnu:prgenv", "tools:tools"}));
-    REQUIRE(c->views.at("dev").include[1].alias == "tools");
-    REQUIRE(c->views.at("dev").include[1].view == "tools");
+    REQUIRE(c->views.at(nm("dev")).include[1].alias == nm("tools"));
+    REQUIRE(c->views.at(nm("dev")).include[1].view == nm("tools"));
     // an include entry that is not alias:view
     for (auto bad : {"tools", "tools:", ":tools", "a:b:c", "a b:c"}) {
         auto j = image_config_json();
@@ -183,6 +183,71 @@ TEST_CASE("2/configs: view references are parsed", "[config]") {
     auto l = layer_config_json();
     l["views"]["a:tools"] = l["views"]["tools"];
     REQUIRE(!format::parse_layer_config(l.dump()));
+}
+
+TEST_CASE("2/configs: names are parsed where the config is read", "[config]") {
+    auto expect_error = [](json j, bool layer, std::string_view text) {
+        auto body = j.dump();
+        auto e = layer ? format::parse_layer_config(body).error()
+                       : format::parse_image_config(body).error();
+        INFO(e);
+        REQUIRE(e.find(text) != std::string::npos);
+    };
+    // the shared fields, the meta keys and the view names
+    auto l = layer_config_json();
+    l["name"] = "my tools";
+    expect_error(l, true, "'my tools' is not a valid name");
+    l = layer_config_json();
+    l["release"] = "v1+cuda";
+    expect_error(l, true, "the field 'release'");
+    l = layer_config_json();
+    l["meta"]["built on"] = "x";
+    expect_error(l, true, "the meta key 'built on'");
+    l = layer_config_json();
+    l["views"]["my view"] = l["views"]["tools"];
+    expect_error(l, true, "the view name 'my view'");
+    // a variable name in a patch
+    l = layer_config_json();
+    l["views"]["tools"]["env"]["scalar"]["MY-VAR"] = "x";
+    expect_error(l, true, "'MY-VAR' is not a valid variable name");
+    auto i = image_config_json();
+    i["default_view"] = "a:b";
+    expect_error(i, false, "the default view");
+}
+
+TEST_CASE("2/objects: inline data must match its digest", "[oci-layout]") {
+    auto wrapper = format::make_wrapper_manifest(format::make_blob("{}"));
+    REQUIRE(wrapper);
+    REQUIRE(format::parse_wrapper_manifest(wrapper->bytes));
+    auto j = json::parse(wrapper->bytes);
+    j["config"]["data"] = "e30=";  // "{}" encoded: it matches
+    REQUIRE(format::parse_wrapper_manifest(j.dump()));
+    for (auto bad : {"eyJ9", "not base64!"}) {
+        INFO(bad);
+        auto k = json::parse(wrapper->bytes);
+        k["config"]["data"] = bad;
+        auto r = format::parse_wrapper_manifest(k.dump());
+        REQUIRE(!r);
+    }
+}
+
+TEST_CASE("6/the v1 code: a v1 env.json is parsed into the new types",
+          "[config]") {
+    uenv::meta m{.name = "tools", .mount = "/user-tools"};
+    m.views["tools"] = uenv::concrete_view{.name = "tools"};
+    m.default_view = "tools";
+    REQUIRE(uenv::v1::make_layer_config(m, std::nullopt));
+    auto bad = m;
+    bad.views["a b"] = uenv::concrete_view{.name = "a b"};
+    auto r = uenv::v1::make_layer_config(bad, std::nullopt);
+    REQUIRE(!r);
+    REQUIRE(r.error().find("the view name 'a b'") != std::string::npos);
+    bad = m;
+    bad.name = "my tools";
+    REQUIRE(!uenv::v1::make_layer_config(bad, std::nullopt));
+    bad = m;
+    bad.mount = "/user tools";
+    REQUIRE(!uenv::v1::make_layer_config(bad, std::nullopt));
 }
 
 TEST_CASE("2/configs: the parser ignores unknown fields", "[config]") {
@@ -223,32 +288,32 @@ TEST_CASE("1/views: a value and a prefix path in one patch warn", "[config]") {
 
 namespace {
 std::vector<uenv::named_layer> my_env_layers() {
-    return {{"prgenv-gnu", mp("/user-environment"), prgenv()},
-            {"tools", mp("/user-environment/tools"), tools()}};
+    return {{nm("prgenv-gnu"), mp("/user-environment"), prgenv()},
+            {nm("tools"), mp("/user-environment/tools"), tools()}};
 }
-std::map<std::string, uenv::image_view> my_env_views() {
-    return {{"dev",
-             {.include = refs({"prgenv-gnu:prgenv", "tools:tools"}),
-              .env = set_value("MY_TOOLS_ROOT", "/user-environment/tools")}},
-            {"modules", {.include = refs({"prgenv-gnu:modules"})}}};
+std::map<uenv::name, uenv::image_view> my_env_views() {
+    return named<uenv::image_view>(
+        {{"dev",
+          {.include = refs({"prgenv-gnu:prgenv", "tools:tools"}),
+           .env = set_value("MY_TOOLS_ROOT", "/user-environment/tools")}},
+         {"modules", {.include = refs({"prgenv-gnu:modules"})}}});
 }
 uenv::config my_env_config() {
-    return {.name = "my-env", .version = "1.0", .release = "v1",
-            .meta = {{"system", "eiger"}}};
+    return cfg("my-env", "1.0", "v1", {{"system", "eiger"}});
 }
 } // namespace
 
 TEST_CASE("1/checks: a valid image", "[model]") {
     auto img = uenv::make_composed_image(std::nullopt, my_env_config(),
-                                         my_env_layers(), my_env_views(), "dev");
+                                         my_env_layers(), my_env_views(), nm("dev"));
     REQUIRE(img);
-    REQUIRE(img->layers.front().alias == "prgenv-gnu");
+    REQUIRE(img->layers.front().alias == nm("prgenv-gnu"));
 }
 
 TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     SECTION("two layers with the same alias") {
         auto ls = my_env_layers();
-        ls[1].alias = "prgenv-gnu";
+        ls[1].alias = nm("prgenv-gnu");
         auto r = uenv::make_composed_image(std::nullopt, my_env_config(), ls,
                                            {}, std::nullopt);
         REQUIRE(!r);
@@ -278,7 +343,7 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     }
     SECTION("an image view that refers to an alias that does not exist") {
         auto v = my_env_views();
-        v["dev"].include.push_back(ref("nope:tools"));
+        v[nm("dev")].include.push_back(ref("nope:tools"));
         auto r = uenv::make_composed_image(std::nullopt, my_env_config(),
                                            my_env_layers(), v, std::nullopt);
         REQUIRE(!r);
@@ -286,7 +351,7 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     }
     SECTION("an image view that refers to a layer view that does not exist") {
         auto v = my_env_views();
-        v["dev"].include.push_back(ref("tools:nope"));
+        v[nm("dev")].include.push_back(ref("tools:nope"));
         auto r = uenv::make_composed_image(std::nullopt, my_env_config(),
                                            my_env_layers(), v, std::nullopt);
         REQUIRE(!r);
@@ -295,7 +360,7 @@ TEST_CASE("1/checks: each check of a composed_image", "[model]") {
     SECTION("a default_view that is not a view of the image") {
         auto r = uenv::make_composed_image(std::nullopt, my_env_config(),
                                            my_env_layers(), my_env_views(),
-                                           "nope");
+                                           nm("nope"));
         REQUIRE(!r);
     }
 }
@@ -375,9 +440,9 @@ TEST_CASE("1/order of layers: the order has no meaning", "[model]") {
     auto extra = make_layer("extra", "/user-tools", true,
                             {{"x", set_value("X", "@uenv-root@")}}, "x");
     std::vector<uenv::named_layer> layers = my_env_layers();
-    layers.push_back({"extra", mp("/user-tools"), extra});
+    layers.push_back({nm("extra"), mp("/user-tools"), extra});
     auto views = my_env_views();
-    views["dev"].include.push_back(ref("extra:x"));
+    views[nm("dev")].include.push_back(ref("extra:x"));
 
     std::vector<int> perm{0, 1, 2};
     std::optional<oci::digest> first_digest;
@@ -389,7 +454,7 @@ TEST_CASE("1/order of layers: the order has no meaning", "[model]") {
             ls.push_back(layers[i]);
         }
         auto img = uenv::make_composed_image(std::nullopt, my_env_config(), ls,
-                                             views, "dev");
+                                             views, nm("dev"));
         REQUIRE(img);
         auto d = format::image_digest(*img);
         REQUIRE(d);
@@ -428,10 +493,11 @@ TEST_CASE("1/order of layers: the order has no meaning", "[model]") {
 TEST_CASE("2/index entries: a layer can occur two times in one image",
           "[model]") {
     auto t = tools();
-    std::vector<uenv::named_layer> ls{{"a", mp("/opt/a"), t}, {"b", mp("/opt/b"), t}};
+    std::vector<uenv::named_layer> ls{{nm("a"), mp("/opt/a"), t}, {nm("b"), mp("/opt/b"), t}};
     auto img = uenv::make_composed_image(
         std::nullopt, my_env_config(), ls,
-        {{"both", {.include = refs({"a:tools", "b:tools"})}}}, "both");
+        named<uenv::image_view>({{"both", {.include = refs({"a:tools", "b:tools"})}}}),
+        nm("both"));
     REQUIRE(img);
     auto c = uenv::concretise(*img, {});
     REQUIRE(c);
@@ -458,7 +524,7 @@ TEST_CASE("1/raise: the raise of a layer", "[model]") {
     REQUIRE(img->digest == t.digest());
     REQUIRE(img->kind == uenv::image_kind::layer);
     REQUIRE(img->layers.size() == 1u);
-    REQUIRE(img->layers[0].alias == "tools");
+    REQUIRE(img->layers[0].alias == nm("tools"));
     REQUIRE(img->views.at(vname("tools")).include ==
             refs({"tools:tools"}));
     REQUIRE(img->default_views == vnames({"tools"}));
@@ -492,7 +558,7 @@ TEST_CASE("1/raise: --force mounts a layer that is not relocatable",
 //
 
 namespace {
-uenv::composed_image image_of(uenv::layer l, std::map<std::string, std::string> meta = {}) {
+uenv::composed_image image_of(uenv::layer l, std::map<uenv::name, std::string> meta = {}) {
     auto img = *uenv::raise_layer(l, std::nullopt, false);
     img.kind = uenv::image_kind::image;
     img.config.meta.insert(meta.begin(), meta.end());
@@ -503,14 +569,14 @@ uenv::composed_image image_of(uenv::layer l, std::map<std::string, std::string> 
 uenv::composed_image my_env() {
     auto img = *uenv::make_composed_image(std::nullopt, my_env_config(),
                                           my_env_layers(), my_env_views(),
-                                          "dev");
+                                          nm("dev"));
     img.digest = format::image_digest(img);
     return img;
 }
 std::vector<std::string> aliases_of(const uenv::composed_image& img) {
     std::vector<std::string> out;
     for (auto& l : img.layers) {
-        out.push_back(l.alias);
+        out.push_back(l.alias.string());
     }
     return out;
 }
@@ -549,8 +615,10 @@ TEST_CASE("1/runtime merge: no identity, and it cannot be stored", "[model]") {
     REQUIRE(objs.error().find("runtime merge cannot be stored") !=
             std::string::npos);
     REQUIRE(!format::image_digest(*img));
-    // the name is for display, in the order of the list
-    REQUIRE(img->config.name == "prgenv-gnu,tools");
+    // a runtime merge has no label: the description lists the items, in the
+    // order of the list
+    REQUIRE(img->config.name == nm("runtime-merge"));
+    REQUIRE(img->config.description == "prgenv-gnu,tools");
     // the layers are sorted by mount point, whatever the order of the list
     auto reversed = uenv::runtime_merge({items[1], items[0]});
     REQUIRE(reversed);
@@ -566,7 +634,7 @@ TEST_CASE("1/runtime merge: two items with the same name need an alias",
     REQUIRE(r.error().find("give one of them an alias") != std::string::npos);
     // with an alias: the same layer at the same mount point is mounted once,
     // and each item keeps its views
-    items[0].alias = "gnu";
+    items[0].alias = nm("gnu");
     r = uenv::runtime_merge(items);
     REQUIRE(r);
     REQUIRE(r->layers.size() == 1u);
@@ -586,8 +654,8 @@ TEST_CASE("1/runtime merge: two layers at one mount point", "[model]") {
 TEST_CASE("1/runtime merge: an alias renames the include of each view",
           "[model]") {
     std::vector<uenv::runtime_merge_item> items{
-        {.alias = "pe", .image = image_of(prgenv())},
-        {.alias = "t", .mount = mp("/opt/t"), .image = image_of(tools()),
+        {.alias = nm("pe"), .image = image_of(prgenv())},
+        {.alias = nm("t"), .mount = mp("/opt/t"), .image = image_of(tools()),
          .movable = true}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
@@ -600,18 +668,18 @@ TEST_CASE("1/runtime merge: an image view of an item is not a layer view",
     // an image with one layer, and an image view that adds a patch
     auto p = prgenv();
     auto pe = *uenv::make_composed_image(
-        std::nullopt, my_env_config(), {{"prgenv-gnu", p.mount, p}},
-        {{"modules",
-          {.include = refs({"prgenv-gnu:modules"}),
-           .env = set_value("EXTRA", "1")}}},
-        "modules");
+        std::nullopt, my_env_config(), {{nm("prgenv-gnu"), p.mount, p}},
+        named<uenv::image_view>({{"modules",
+                                  {.include = refs({"prgenv-gnu:modules"}),
+                                   .env = set_value("EXTRA", "1")}}}),
+        nm("modules"));
     std::vector<uenv::runtime_merge_item> items{
-        {.alias = "a", .image = pe},
+        {.alias = nm("a"), .image = pe},
         {.image = image_of(tools())}};
     auto img = uenv::runtime_merge(items);
     REQUIRE(img);
     // the image view is named by the alias of the item
-    const auto key = uenv::image_view_name{.item = "a", .name = "modules"};
+    const auto key = uenv::image_view_name{.item = nm("a"), .name = nm("modules")};
     REQUIRE(img->views.contains(key));
     REQUIRE(img->views.at(key).include == refs({"a:modules"}));
     REQUIRE(img->default_views[0] == key);
@@ -848,7 +916,7 @@ TEST_CASE("1/the mount point in a layer view", "[env]") {
 TEST_CASE("1/concretise: the views", "[concretise]") {
     auto img = *uenv::make_composed_image(std::nullopt, my_env_config(),
                                           my_env_layers(), my_env_views(),
-                                          "dev");
+                                          nm("dev"));
     SECTION("the default view") {
         auto c = uenv::concretise(img, {});
         REQUIRE(c);
@@ -913,7 +981,7 @@ namespace {
 json my_env_index() {
     auto img = *uenv::make_composed_image(std::nullopt, my_env_config(),
                                           my_env_layers(), my_env_views(),
-                                          "dev");
+                                          nm("dev"));
     return json::parse(format::make_image_objects(img)->index.bytes);
 }
 } // namespace
@@ -932,7 +1000,7 @@ TEST_CASE("1/the composed_image model: a layer refers to its manifest by "
     l.manifest = format::layer_descriptor(
         oci::digest::sha256(util::sha256_string("other bytes")), 1234);
     auto img = uenv::make_composed_image(
-        std::nullopt, my_env_config(), {{"prgenv-gnu", l.mount, l}}, {},
+        std::nullopt, my_env_config(), {{nm("prgenv-gnu"), l.mount, l}}, {},
         std::nullopt);
     REQUIRE(img);
     auto objs = format::make_image_objects(*img);
@@ -960,7 +1028,7 @@ TEST_CASE("2/objects: the index of my-env", "[oci-layout]") {
 TEST_CASE("2/objects: the wrapper uses the OCI empty descriptor", "[oci-layout]") {
     auto img = *uenv::make_composed_image(std::nullopt, my_env_config(),
                                           my_env_layers(), my_env_views(),
-                                          "dev");
+                                          nm("dev"));
     auto w = json::parse(format::make_image_objects(img)->wrapper.bytes);
     REQUIRE(w["layers"].size() == 1u);
     REQUIRE(w["layers"][0]["data"] == "e30=");
@@ -1005,6 +1073,13 @@ TEST_CASE("2/index entries: an index that does not have the form is an error",
         j["manifests"][1]["annotations"].erase("vnd.uenv.layer");
         REQUIRE(!format::parse_index(j.dump()));
     }
+    SECTION("a layer entry with an alias that is not a name") {
+        auto j = good;
+        j["manifests"][1]["annotations"]["vnd.uenv.layer"] = "tools:2";
+        auto r = format::parse_index(j.dump());
+        REQUIRE(!r);
+        REQUIRE(r.error().find("'tools:2' is not a valid name") != std::string::npos);
+    }
     SECTION("a layer entry without a mount point") {
         auto j = good;
         j["manifests"][1]["annotations"].erase("vnd.uenv.mount");
@@ -1044,15 +1119,13 @@ TEST_CASE("2/identity: no content depends on time", "[oci-layout]") {
 TEST_CASE("2/tags: the form of a tag", "[oci-layout]") {
     auto d = *oci::digest::parse(
         "sha256:3fa9c2e1d04b7a65aaaabbbbccccddddeeeeffff000011112222333344445555");
-    uenv::config c{.name = "prgenv-gnu", .version = "26.3", .release = "v1",
-                   .meta = {{"uarch", "gh200"}, {"system", "daint"}}};
+    auto c = cfg("prgenv-gnu", "26.3", "v1", {{"uarch", "gh200"}, {"system", "daint"}});
     REQUIRE(format::make_tag(c, d) == "26.3-v1-daint-gh200-3fa9c2e1d04b7a65");
-    c.version = "1.0+cuda";
-    REQUIRE(format::make_tag(c, d).starts_with("1.0_cuda-v1"));
-    c.version = std::string(300, 'x');
+    // a meta value can have characters that a tag cannot
+    c.meta[nm("system")] = "daint+alps";
+    REQUIRE(format::make_tag(c, d).starts_with("26.3-v1-daint_alps"));
+    c.version = nm(std::string(300, 'x'));
     auto t = format::make_tag(c, d);
     REQUIRE(t.size() <= 128u);
     REQUIRE(t.ends_with("-3fa9c2e1d04b7a65"));
-    c.version = ".hidden";
-    REQUIRE(format::make_tag(c, d)[0] == '_');
 }

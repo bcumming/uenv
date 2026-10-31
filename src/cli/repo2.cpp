@@ -99,8 +99,7 @@ int repo_status(const repo_args& args, const global_settings& settings) {
     }
     term::msg("{}: {} objects", p->string(), all ? all->size() : 0);
     for (auto& m : r->missing) {
-        term::msg("  missing blobs: {}/{}:{} id={}", m.cfg.name, m.cfg.version,
-                  m.cfg.release, m.id);
+        term::msg("  missing blobs: {} id={}", label_string(m.cfg), m.id);
     }
     term::msg("  `uenv repo update` would delete {} blobs ({} bytes) and {} "
               ".part files; {} unused blobs are newer than 24 hours",

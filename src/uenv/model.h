@@ -26,15 +26,21 @@ inline constexpr std::string_view uenv_root_placeholder = "@uenv-root@";
 
 // the shared fields of a layer config and an image config
 struct config {
-    std::string name;
-    std::string version;
-    std::string release;
+    uenv::name name;
+    // absent only for a squashfs file that a user starts directly: a stored
+    // config always has them
+    std::optional<uenv::name> version;
+    std::optional<uenv::name> release;
     // empty means absent: the stored form omits it
     std::string description;
-    std::map<std::string, std::string> meta;
+    std::map<uenv::name, std::string> meta;
 
     friend bool operator==(const config&, const config&) = default;
 };
+
+// "name/version:release", or the name if the config has no version and
+// release (a squashfs file started directly)
+std::string label_string(const config& c);
 
 struct storage {
     enum class kind_t { squashfs, erofs };
@@ -54,19 +60,27 @@ struct layer_view {
 
 // the layer config: what the layer is, where to mount it, and how to use it
 struct layer_config {
+    // a layer config whose default view is one of its views
+    static util::expected<layer_config, std::string>
+    make(config shared, mount_point mount, bool relocatable,
+         std::map<uenv::name, layer_view> views,
+         std::optional<uenv::name> default_view);
+
     config shared;
     mount_point mount;
     bool relocatable = false;
-    std::map<std::string, layer_view> views;
-    std::optional<std::string> default_view;
+    std::map<uenv::name, layer_view> views;
+    std::optional<uenv::name> default_view;
 };
 
 struct layer {
     // make a layer from its parts: the layer config, the file system image,
-    // and the descriptor of the layer manifest (absent for a squashfs file
-    // that is started directly)
-    static layer make(layer_config cfg, storage store,
-                      std::optional<oci::descriptor> manifest = std::nullopt);
+    // and the descriptor of the layer manifest. The manifest is absent if and
+    // only if the file system image has no digest: a squashfs file that is
+    // started directly.
+    static util::expected<layer, std::string>
+    make(layer_config cfg, storage store,
+         std::optional<oci::descriptor> manifest = std::nullopt);
 
     // the descriptor of the layer manifest, as an index entry refers to it.
     // Its digest is the identity of the layer. Absent for a squashfs file.
@@ -78,8 +92,8 @@ struct layer {
     // the build mount point
     mount_point mount;
     bool relocatable = false;
-    std::map<std::string, layer_view> views;
-    std::optional<std::string> default_view;
+    std::map<uenv::name, layer_view> views;
+    std::optional<uenv::name> default_view;
 
     // the identity of the layer: the digest of its layer manifest
     std::optional<oci::digest> digest() const {
@@ -91,7 +105,7 @@ struct layer {
 };
 
 struct named_layer {
-    std::string alias;
+    uenv::name alias;
     mount_point mount;
     struct layer layer;
 };
@@ -137,7 +151,7 @@ struct concrete_image {
     // applied in order, one at a time
     std::vector<envvars::patch> patches;
     // the views that the patches load, in order
-    std::vector<view_description> views;
+    std::vector<view_request> views;
 };
 
 using model_error = std::string;
@@ -147,19 +161,19 @@ using model_error = std::string;
 util::expected<composed_image, model_error>
 make_composed_image(std::optional<oci::digest> digest, config cfg,
                     std::vector<named_layer> layers,
-                    std::map<std::string, image_view> views,
-                    std::optional<std::string> default_view);
+                    std::map<uenv::name, image_view> views,
+                    std::optional<uenv::name> default_view);
 
 // Raise a layer: a composed_image with one layer, and an image view for each
 // layer view. `mount` is the mount point at which to use the layer.
 util::expected<composed_image, model_error>
 raise_layer(const layer& l, std::optional<mount_point> mount, bool force,
-            std::optional<std::string> alias = std::nullopt);
+            std::optional<uenv::name> alias = std::nullopt);
 
 // one item of the list given to uenv run/start or srun --uenv:
 // [alias=]label[:mount]
 struct runtime_merge_item {
-    std::optional<std::string> alias;
+    std::optional<uenv::name> alias;
     std::optional<mount_point> mount;
     // an image, a raised layer, or a raised squashfs file
     composed_image image;
@@ -183,15 +197,15 @@ envvars::patch replace_root(const envvars::patch& p, const mount_point& mount);
 // the default views of the image, unless use_default_views is false.
 util::expected<concrete_image, model_error>
 concretise(const composed_image& img,
-           const std::vector<view_description>& views,
+           const std::vector<view_request>& views,
            bool use_default_views = true);
 
 // "alias:view" or "view": the form of a view in --view and UENV_VIEW
-std::string view_string(const view_description& v);
+std::string view_string(const view_request& v);
 
 // The session variables: UENV_VIEW, UENV_MOUNT_LIST
 envvars::patch session_patch(const concrete_image& c,
-                             const std::vector<view_description>& views);
+                             const std::vector<view_request>& views);
 
 // Apply a list of patches to an environment, one at a time
 // (1-composition.md, "Load more than one view").

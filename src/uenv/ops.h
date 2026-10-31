@@ -35,7 +35,7 @@ parse_label_query(std::string text, const label_keys& keys,
 // one item of a list for start/run: [alias=][+]label[:mount] or path[:mount]
 struct item_spec {
     std::string text;
-    std::optional<std::string> alias;
+    std::optional<uenv::name> alias;
     std::optional<label_query> query;
     std::optional<std::filesystem::path> file;
     std::optional<mount_point> mount;
@@ -72,7 +72,7 @@ read_squashfs_meta(const std::filesystem::path& sqfs);
 util::expected<object_record, std::string>
 add_squashfs(store& s, const std::filesystem::path& sqfs,
              const layer_config& cfg,
-             const std::map<std::string, std::string>& image_meta,
+             const std::map<uenv::name, std::string>& image_meta,
              bool as_layer,
              std::function<void(std::uint64_t, std::uint64_t)> progress = {});
 

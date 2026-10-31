@@ -199,29 +199,62 @@ parse_view_description(const std::string& in) {
     return result;
 }
 
-util::expected<layer_view_ref, parse_error>
+namespace {
+
+// "[item:]name", parsed by parse_view_description
+util::expected<view_request, std::string>
+view_request_of(const view_description& v) {
+    auto n = name::parse(v.name);
+    if (!n) {
+        return util::unexpected{n.error()};
+    }
+    if (!v.uenv) {
+        return view_request{.name = *n};
+    }
+    auto item = name::parse(*v.uenv);
+    if (!item) {
+        return util::unexpected{item.error()};
+    }
+    return view_request{.item = *item, .name = *n};
+}
+
+} // namespace
+
+util::expected<layer_view_ref, std::string>
 parse_layer_view_ref(const std::string& in) {
     auto v = parse_view_description(in);
     if (!v) {
-        return util::unexpected(v.error());
+        return util::unexpected{fmt::format(
+            "'{}' is not a layer view of the form alias:view: {}", in,
+            v.error().message())};
     }
     if (!v->uenv) {
-        return util::unexpected(parse_error{
-            in, "expected a layer view as alias:view", lex::token{}});
+        return util::unexpected{fmt::format(
+            "'{}' is not a layer view of the form alias:view", in)};
     }
-    return layer_view_ref{.alias = *v->uenv, .view = v->name};
+    auto r = view_request_of(*v);
+    if (!r) {
+        return util::unexpected{r.error()};
+    }
+    return layer_view_ref{.alias = *r->item, .view = r->name};
 }
 
-util::expected<std::string, parse_error> parse_view_name(const std::string& in) {
-    auto v = parse_view_description(in);
-    if (!v) {
-        return util::unexpected(v.error());
+util::expected<std::vector<view_request>, std::string>
+parse_view_requests(const std::string& in) {
+    auto vs = parse_view_args(in);
+    if (!vs) {
+        return util::unexpected{fmt::format("'{}' is not a list of views: {}",
+                                            in, vs.error().message())};
     }
-    if (v->uenv) {
-        return util::unexpected(parse_error{
-            in, "the name of a view cannot contain ':'", lex::token{}});
+    std::vector<view_request> out;
+    for (auto& v : *vs) {
+        auto r = view_request_of(v);
+        if (!r) {
+            return util::unexpected{r.error()};
+        }
+        out.push_back(std::move(*r));
     }
-    return v->name;
+    return out;
 }
 
 std::string format_as(const layer_view_ref& r) {
@@ -229,7 +262,11 @@ std::string format_as(const layer_view_ref& r) {
 }
 
 std::string format_as(const image_view_name& n) {
-    return n.item ? fmt::format("{}:{}", *n.item, n.name) : n.name;
+    return n.item ? fmt::format("{}:{}", *n.item, n.name) : n.name.string();
+}
+
+std::string format_as(const view_request& v) {
+    return v.item ? fmt::format("{}:{}", *v.item, v.name) : v.name.string();
 }
 
 // env_view_description is parsed from the UENV_VIEW environemnt variable
