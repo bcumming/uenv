@@ -25,24 +25,25 @@ struct repo_migrate_args {
 
 int repo_migrate(const repo_migrate_args& args,
                  const global_settings& settings) {
-    auto p = cli::repo_path(args.path, settings);
-    if (!p) {
-        term::error("{}", p.error());
+    auto path = cli::repo_path(args.path, settings);
+    if (!path) {
+        term::error("{}", path.error());
         return 1;
     }
-    auto r =
-        migrate_v1(*p, {}, [](const std::string& m) { term::msg("{}", m); });
-    if (!r) {
-        term::error("{}", r.error());
+    auto result = migrate_v1(*path, {}, [](const std::string& message) {
+        term::msg("{}", message);
+    });
+    if (!result) {
+        term::error("{}", result.error());
         return 1;
     }
     term::msg("migrated {} images ({} already done, {} squashfs hashed)",
-              r->migrated, r->skipped, r->hashed);
-    if (r->failed) {
+              result->migrated, result->skipped, result->hashed);
+    if (result->failed) {
         term::error("{} images were not migrated. The other images can be "
                     "used. Run `uenv repo migrate` again after the problem is "
                     "fixed.\n{}",
-                    r->failed, fmt::join(r->errors, "\n"));
+                    result->failed, fmt::join(result->errors, "\n"));
         return 1;
     }
     return 0;
@@ -55,8 +56,8 @@ argparse::command repo_migrate_command(const global_settings& settings) {
                                                    "convert a v1 repository");
     c.add_positional("path", &repo_migrate_args::path, "the repository")
         .complete(completion::directory());
-    c.action([&settings](const repo_migrate_args& a) {
-        return repo_migrate(a, settings);
+    c.action([&settings](const repo_migrate_args& args) {
+        return repo_migrate(args, settings);
     });
     return std::move(c).build();
 }

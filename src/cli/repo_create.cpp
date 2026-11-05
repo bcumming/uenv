@@ -23,17 +23,17 @@ struct repo_create_args {
 };
 
 int repo_create(const repo_create_args& args, const global_settings& settings) {
-    auto p = cli::repo_path(args.path, settings);
-    if (!p) {
-        term::error("{}", p.error());
+    auto path = cli::repo_path(args.path, settings);
+    if (!path) {
+        term::error("{}", path.error());
         return 1;
     }
-    auto s = store::create(*p);
-    if (!s) {
-        term::error("{}", s.error());
+    auto store = uenv::store::create(*path);
+    if (!store) {
+        term::error("{}", store.error());
         return 1;
     }
-    term::msg("the repository {} is ready", p->string());
+    term::msg("the repository {} is ready", path->string());
     return 0;
 }
 
@@ -44,8 +44,8 @@ argparse::command repo_create_command(const global_settings& settings) {
                                                   "create a repository");
     c.add_positional("path", &repo_create_args::path, "the repository")
         .complete(completion::directory());
-    c.action([&settings](const repo_create_args& a) {
-        return repo_create(a, settings);
+    c.action([&settings](const repo_create_args& args) {
+        return repo_create(args, settings);
     });
     return std::move(c).build();
 }

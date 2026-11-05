@@ -25,25 +25,25 @@ struct repo_update_args {
 };
 
 int repo_update(const repo_update_args& args, const global_settings& settings) {
-    auto p = cli::repo_path(args.path, settings);
-    if (!p) {
-        term::error("{}", p.error());
+    auto path = cli::repo_path(args.path, settings);
+    if (!path) {
+        term::error("{}", path.error());
         return 1;
     }
-    auto s = store::open(*p, false);
-    if (!s) {
-        term::error("{}", s.error());
+    auto store = uenv::store::open(*path, false);
+    if (!store) {
+        term::error("{}", store.error());
         return 1;
     }
-    auto r = s->update(args.force, false);
-    if (!r) {
-        term::error("{}", r.error());
+    auto report = store->update(args.force, false);
+    if (!report) {
+        term::error("{}", report.error());
         return 1;
     }
     term::msg("deleted {} records with missing blobs, {} blobs ({} bytes), {} "
               ".part files",
-              r->missing.size(), r->pruned.size(), r->released,
-              r->parts.size());
+              report->missing.size(), report->pruned.size(), report->released,
+              report->parts.size());
     return 0;
 }
 
@@ -56,8 +56,8 @@ argparse::command repo_update_command(const global_settings& settings) {
         .complete(completion::directory());
     c.add_flag("force", &repo_update_args::force,
                "no grace period: use only when nothing writes");
-    c.action([&settings](const repo_update_args& a) {
-        return repo_update(a, settings);
+    c.action([&settings](const repo_update_args& args) {
+        return repo_update(args, settings);
     });
     return std::move(c).build();
 }

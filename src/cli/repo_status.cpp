@@ -27,55 +27,56 @@ struct repo_status_args {
 };
 
 int repo_status(const repo_status_args& args, const global_settings& settings) {
-    auto p = cli::repo_path(args.path, settings);
-    if (!p) {
-        term::error("{}", p.error());
+    auto path = cli::repo_path(args.path, settings);
+    if (!path) {
+        term::error("{}", path.error());
         return 1;
     }
     // the v1 images that are not in the v2 part: no hash, no write
     unsigned pending = 0;
-    if (has_v1_part(*p)) {
-        if (auto m = migrate_v1(*p, {.dry_run = true})) {
-            pending = m->pending;
+    if (has_v1_part(*path)) {
+        if (auto dry_run = migrate_v1(*path, {.dry_run = true})) {
+            pending = dry_run->pending;
         }
     }
-    auto state = inspect_repo(*p);
+    auto state = inspect_repo(*path);
     if (state == repo_layout::v1_only) {
         term::msg("{}: v1 format, {} images. Run `uenv repo migrate`.",
-                  p->string(), pending);
+                  path->string(), pending);
         return 0;
     }
-    auto s = store::open(*p, true);
-    if (!s) {
-        term::error("{}", s.error());
+    auto store = uenv::store::open(*path, true);
+    if (!store) {
+        term::error("{}", store.error());
         return 1;
     }
-    auto r = s->update(false, true);
-    if (!r) {
-        term::error("{}", r.error());
+    auto report = store->update(false, true);
+    if (!report) {
+        term::error("{}", report.error());
         return 1;
     }
-    auto all = s->all();
+    auto objects = store->all();
     if (args.json) {
-        nlohmann::json j{{"path", p->string()},
-                         {"objects", all ? all->size() : 0},
-                         {"missing", r->missing.size()},
-                         {"prune", r->pruned.size()},
-                         {"recent", r->kept_recent.size()},
-                         {"parts", r->parts.size()},
-                         {"released", r->released},
-                         {"v1_not_migrated", pending}};
-        term::msg("{}", j.dump());
+        nlohmann::json out{{"path", path->string()},
+                           {"objects", objects ? objects->size() : 0},
+                           {"missing", report->missing.size()},
+                           {"prune", report->pruned.size()},
+                           {"recent", report->kept_recent.size()},
+                           {"parts", report->parts.size()},
+                           {"released", report->released},
+                           {"v1_not_migrated", pending}};
+        term::msg("{}", out.dump());
         return 0;
     }
-    term::msg("{}: {} objects", p->string(), all ? all->size() : 0);
-    for (auto& m : r->missing) {
-        term::msg("  missing blobs: {} id={}", label_string(m.cfg), m.id);
+    term::msg("{}: {} objects", path->string(), objects ? objects->size() : 0);
+    for (auto& record : report->missing) {
+        term::msg("  missing blobs: {} id={}", label_string(record.cfg),
+                  record.id);
     }
     term::msg("  `uenv repo update` would delete {} blobs ({} bytes) and {} "
               ".part files; {} unused blobs are newer than 24 hours",
-              r->pruned.size(), r->released, r->parts.size(),
-              r->kept_recent.size());
+              report->pruned.size(), report->released, report->parts.size(),
+              report->kept_recent.size());
     if (pending) {
         term::msg("  {} v1 images are not migrated: run `uenv repo migrate`",
                   pending);
@@ -91,8 +92,8 @@ argparse::command repo_status_command(const global_settings& settings) {
     c.add_positional("path", &repo_status_args::path, "the repository")
         .complete(completion::directory());
     c.add_flag("json", &repo_status_args::json, "print JSON");
-    c.action([&settings](const repo_status_args& a) {
-        return repo_status(a, settings);
+    c.action([&settings](const repo_status_args& args) {
+        return repo_status(args, settings);
     });
     return std::move(c).build();
 }
