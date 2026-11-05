@@ -53,7 +53,14 @@ The CLI replaces `uenv image ls/add/rm/inspect/find/pull/push/copy/delete`
 and `uenv repo create/status/update/migrate`. It adds `uenv image compose`
 and `uenv image attach`. `uenv start` and `uenv run` take a list of images,
 layers (`+label`) and squashfs files, with `--force`. A list of more than
-one item is a runtime merge.
+one item is a runtime merge. `uenv status` shows each item of the list:
+its label, the views that it loads, and its layers.
+
+The text output is for quick reading, and `--json` gives each field. `ls`
+shows the columns `uenv`, `meta`, `id` and `size`, and `ls +` shows the
+building blocks (`--all` adds the layers inside images). `find` adds the
+date of the push. `inspect` shows the views first, then the digest, the
+meta, and the layers by id.
 
 ## 2. How the spike settled the open questions
 
@@ -95,9 +102,9 @@ design sections and their tests.
 | part        | file                                | cases | what it uses                       |
 | ----------- | ----------------------------------- | ----- | ---------------------------------- |
 | model       | `test/unit/v2_model.cpp`            | 53    | memory only                        |
-| repository  | `test/unit/v2_store.cpp`            | 19    | temporary repositories, `fork`     |
+| repository  | `test/unit/v2_store.cpp`            | 21    | temporary repositories, `fork`     |
 | registry    | `test/unit/v2_registry.cpp`         | 20    | a zot that the tests start         |
-| end to end  | `test/integration/composable.bats`  | 32    | the CLI, real mounts, zot          |
+| end to end  | `test/integration/composable.bats`  | 33    | the CLI, real mounts, zot          |
 
 ### What each part checks
 
@@ -117,7 +124,8 @@ design sections and their tests.
   lookup by label, id and layer marker. An add and a delete that stop at
   each step (`UENV_TEST_FAULT`, in a child process). The 24-hour grace period
   of a prune, and `--force`. Six writers at the same time. Compose, which
-  copies layer manifests byte for byte.
+  copies layer manifests byte for byte. The description of each item of a
+  list, and the parse of `UENV_SESSION`.
 - **Registry** (`[registry]`, `[catalogue]`, `[gc]`): the three forms of an
   address. The order of writes. The empty blob, and no overwrite of a tag.
   Checks before a download. A copy with and without a change, and the
@@ -125,9 +133,9 @@ design sections and their tests.
   Pagination. A registry with no catalogue. Push from an OCI layout
   directory. The catalogue with eight writers at the same time, a slow
   writer, and a wrong event.
-- **End to end**: add, ls, inspect, run with the setuid helper, the default
-  view and `--no-default-view`, runtime merges with images of more than one
-  layer, the order of views, compose with a nested mount point, a missing
+- **End to end**: add, ls, inspect, status, run with the setuid helper, the
+  default view and `--no-default-view`, runtime merges with images of more
+  than one layer, the order of views, compose with a nested mount point, a missing
   squashfs, `oras` on the repository, a Python reference for the canonical
   form, a stopped add and pull, the migration (a stop, a failed image, a
   second run, `meta/` inside the squashfs), and the registry commands
@@ -137,8 +145,8 @@ design sections and their tests.
 
 | run                                                   | result                                          |
 | ----------------------------------------------------- | ----------------------------------------------- |
-| `build-v2/test/unit` (all, old and new)               | 5275 assertions pass                            |
-| `build-v2/test/bats test/composable.bats`             | 32 of 32 pass, with real mounts and zot         |
+| `build-v2/test/unit` (all, old and new)               | 5311 assertions pass                            |
+| `build-v2/test/bats test/composable.bats`             | 33 of 33 pass, with real mounts and zot         |
 | new unit tests with AddressSanitizer                  | all pass, no ASan error                         |
 | registry tests on distribution `registry:2`           | 18 of 23 pass (see R3 in section 4)             |
 | Slurm plugin                                          | builds (`build-slurm`). Not run: no cluster     |
@@ -193,6 +201,12 @@ UENV_TEST_REGISTRY=http://127.0.0.1:5000 ./test/unit "[registry]~[gc]"
 - **A runtime merge** starts an image with more than one layer next to a
   different image, with real mounts. A layer that two items share is
   mounted once, and a nested mount point is checked before the mount.
+- **`uenv status` shows what the user started.** For an image, it shows
+  the label and the view, for example `solver-viz/1.0:v1` and `viz`, not
+  only the layers. For a runtime merge, it shows each item with its own
+  views.
+- **No date is in an image.** `find` shows the date of the push, from the
+  time of the catalogue event, and `ls` shows no date.
 - **The migration** links the squashfs files, and does not change the v1
   part. Each migrated image can be used at once. A failed image does not
   stop the others, and a second run adds only what is not migrated.
