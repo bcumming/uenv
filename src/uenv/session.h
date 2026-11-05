@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -17,6 +18,10 @@ namespace uenv {
 // open the repositories of the configuration, in order
 util::expected<std::vector<store>, std::string>
 open_stores(const configuration& config, bool readonly = true);
+
+// the path of the repository that the user writes
+util::expected<std::filesystem::path, std::string>
+user_repo_path(const configuration& config);
 
 // open (or create) the repository that the user writes
 util::expected<store, std::string> open_user_store(const configuration& config);

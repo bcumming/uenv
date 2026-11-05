@@ -47,15 +47,24 @@ open_stores(const configuration& config, bool readonly) {
     return stores;
 }
 
-util::expected<store, std::string>
-open_user_store(const configuration& config) {
+util::expected<fs::path, std::string>
+user_repo_path(const configuration& config) {
     auto repo = config.user_repo();
     if (!repo) {
         return unexpected{std::string{
             "there is no repository: give one with --repo, or in the "
             "configuration"}};
     }
-    return store::create(repo->path);
+    return repo->path;
+}
+
+util::expected<store, std::string>
+open_user_store(const configuration& config) {
+    auto p = user_repo_path(config);
+    if (!p) {
+        return unexpected{p.error()};
+    }
+    return store::create(*p);
 }
 
 label_keys keys_of(const configuration& config) {

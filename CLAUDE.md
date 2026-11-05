@@ -212,7 +212,7 @@ changing that code path, check they are actually running rather than skipping.
 
 ### Source Structure
 
-- `src/cli/` - CLI command implementations (build, completion, config, help, image, repo, run, start, status). Each `uenv image` subcommand has its own file (add, attach, compose, copy, delete, find, inspect, ls, pull, push, rm), registered in `image.cpp`, with the shared code in `image_util.h/cpp` (namespace `uenv::cli`), the tree of commands they are registered in (`cli.h/cpp`), and tab completion (`complete.h/cpp`, and the shell scripts in `src/cli/completion/`). See "Tab completion" below.
+- `src/cli/` - CLI command implementations (build, completion, config, help, image, repo, run, start, status). Each subcommand of `uenv image` and `uenv repo` has its own file (`image_ls.cpp`, `repo_status.cpp`, ...), registered in `image.cpp` and `repo.cpp`, with the shared code in `image_util.h/cpp` and `repo_util.h/cpp` (namespace `uenv::cli`), the tree of commands they are registered in (`cli.h/cpp`), and tab completion (`complete.h/cpp`, and the shell scripts in `src/cli/completion/`). See "Tab completion" below.
 - `src/argparse/` - Command line argument parser used by the CLI and `squashfs-mount`. See "The `argparse` command line parser" below.
 - `src/uenv/` - Core library shared between CLI and Slurm plugin
   - Environment management (`env.h/cpp`, `uenv.h/cpp`)
