@@ -117,9 +117,37 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys);
 util::expected<void, std::string> check_nested_mounts(const composed_image& img);
 
 
+// one item of the list, as `uenv status` shows it: what the user started
+struct session_item {
+    enum class kind_t { image, layer, file };
+    struct layer_t {
+        uenv::name alias;
+        std::string label;
+        mount_point mount;
+    };
+    // the alias of the item, else the name of its config
+    uenv::name name;
+    kind_t kind = kind_t::image;
+    // name/version:release, or the path of a squashfs file
+    std::string label;
+    // the digest of the image or the layer. Absent for a squashfs file.
+    std::optional<oci::digest> digest;
+    // the layers of the item, at the mount points of the session
+    std::vector<layer_t> layers;
+    // the views of the item that the session loads
+    std::vector<uenv::name> views;
+};
+
+struct resolved_items {
+    // the item itself for one item, else a runtime merge
+    composed_image image;
+    // the items, in the order of the list
+    std::vector<session_item> items;
+};
+
 // resolve the list of uenv run/start or srun --uenv, and make one
-// composed_image: the item itself for one item, else a runtime merge
-util::expected<composed_image, std::string>
+// composed_image
+util::expected<resolved_items, std::string>
 resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
               bool force);
 

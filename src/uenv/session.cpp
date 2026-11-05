@@ -83,10 +83,11 @@ prepare_session(const std::string& uenv_arg,
             return unexpected{stores.error()};
         }
     }
-    auto img = resolve_items(*stores, *items, force);
-    if (!img) {
-        return unexpected{img.error()};
+    auto resolved = resolve_items(*stores, *items, force);
+    if (!resolved) {
+        return unexpected{resolved.error()};
     }
+    auto img = &resolved->image;
     // a runtime merge can put the mount point of one item inside a layer of
     // another item: check it here, as compose does, so that the error names
     // the layers. This runs unprivileged: see check_nested_mounts in ops.h.
@@ -118,7 +119,31 @@ prepare_session(const std::string& uenv_arg,
                                      : l.layer.store.file->string())};
         }
     }
-    session out{.image = *img, .concrete = *c, .views = views};
+    // the views of each item: a view with no item belongs to the one item
+    // that has it
+    auto described = std::move(resolved->items);
+    for (auto& v : views) {
+        std::optional<uenv::name> owner = v.item;
+        if (!owner && described.size() == 1u) {
+            owner = described.front().name;
+        }
+        if (!owner) {
+            for (auto& [k, _] : img->views()) {
+                if (k.name == v.name && k.item) {
+                    owner = k.item;
+                }
+            }
+        }
+        for (auto& d : described) {
+            if (owner && d.name == *owner) {
+                d.views.push_back(v.name);
+            }
+        }
+    }
+    session out{.image = *img,
+                .concrete = *c,
+                .items = std::move(described),
+                .views = views};
     out.environment = calling_environment;
     auto patches = c->patches;
     patches.push_back(session_patch(*c, views));
@@ -155,11 +180,151 @@ prepare_session(const std::string& uenv_arg,
         tel.push_back(e);
     }
     out.environment.set("UENV_TELEMETRY", tel.dump());
+    out.environment.set("UENV_SESSION", session_json(out.items));
     if (forward_prefix) {
         forward_unsecure_variables(out.environment, *forward_prefix);
     }
     for (auto& [file, mount] : c->mounts) {
         out.mounts.push_back(fmt::format("{}:{}", file.string(), mount));
+    }
+    return out;
+}
+
+namespace {
+
+const char* kind_string(session_item::kind_t k) {
+    switch (k) {
+    case session_item::kind_t::layer:
+        return "layer";
+    case session_item::kind_t::file:
+        return "file";
+    default:
+        return "image";
+    }
+}
+
+} // namespace
+
+std::string session_json(const std::vector<session_item>& items) {
+    nlohmann::json j = nlohmann::json::array();
+    for (auto& d : items) {
+        nlohmann::json layers = nlohmann::json::array();
+        for (auto& l : d.layers) {
+            layers.push_back({{"alias", l.alias.string()},
+                              {"label", l.label},
+                              {"mount", l.mount.string()}});
+        }
+        nlohmann::json views = nlohmann::json::array();
+        for (auto& v : d.views) {
+            views.push_back(v.string());
+        }
+        j.push_back({{"name", d.name.string()},
+                     {"kind", kind_string(d.kind)},
+                     {"label", d.label},
+                     {"digest", d.digest ? nlohmann::json(d.digest->string())
+                                         : nlohmann::json(nullptr)},
+                     {"layers", layers},
+                     {"views", views}});
+    }
+    return j.dump();
+}
+
+util::expected<std::vector<session_item>, std::string>
+parse_session_json(const std::string& text) {
+    using json = nlohmann::json;
+    auto j = json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_array()) {
+        return unexpected{std::string{"UENV_SESSION is not a JSON array"}};
+    }
+    auto str = [](const json& o, const char* key)
+        -> util::expected<std::string, std::string> {
+        auto it = o.find(key);
+        if (it == o.end() || !it->is_string()) {
+            return unexpected{
+                fmt::format("UENV_SESSION: '{}' must be a string", key)};
+        }
+        return it->get<std::string>();
+    };
+    auto nm = [&](const json& o, const char* key)
+        -> util::expected<uenv::name, std::string> {
+        auto t = str(o, key);
+        if (!t) {
+            return unexpected{t.error()};
+        }
+        auto n = uenv::name::parse(*t);
+        if (!n) {
+            return unexpected{fmt::format("UENV_SESSION: '{}': {}", key, n.error())};
+        }
+        return *n;
+    };
+    std::vector<session_item> out;
+    for (auto& e : j) {
+        if (!e.is_object()) {
+            return unexpected{std::string{"UENV_SESSION: an item is not an object"}};
+        }
+        auto name = nm(e, "name");
+        auto kind = str(e, "kind");
+        auto label = str(e, "label");
+        if (!name || !kind || !label) {
+            return unexpected{!name ? name.error() : !kind ? kind.error() : label.error()};
+        }
+        session_item::kind_t k;
+        if (*kind == "image") {
+            k = session_item::kind_t::image;
+        } else if (*kind == "layer") {
+            k = session_item::kind_t::layer;
+        } else if (*kind == "file") {
+            k = session_item::kind_t::file;
+        } else {
+            return unexpected{fmt::format("UENV_SESSION: the kind '{}' is not "
+                                          "image, layer or file", *kind)};
+        }
+        std::optional<oci::digest> digest;
+        if (auto d = e.find("digest"); d != e.end() && !d->is_null()) {
+            if (!d->is_string()) {
+                return unexpected{
+                    std::string{"UENV_SESSION: the digest is not a string"}};
+            }
+            auto p = oci::digest::parse(d->get<std::string>());
+            if (!p) {
+                return unexpected{fmt::format("UENV_SESSION: the digest: {}",
+                                              p.error().message())};
+            }
+            digest = *p;
+        }
+        session_item item{.name = *name, .kind = k, .label = *label, .digest = digest};
+        auto layers = e.find("layers");
+        auto views = e.find("views");
+        if (layers == e.end() || !layers->is_array() || views == e.end() ||
+            !views->is_array()) {
+            return unexpected{std::string{
+                "UENV_SESSION: an item needs the arrays 'layers' and 'views'"}};
+        }
+        for (auto& l : *layers) {
+            if (!l.is_object()) {
+                return unexpected{std::string{"UENV_SESSION: a layer is not an object"}};
+            }
+            auto alias = nm(l, "alias");
+            auto llabel = str(l, "label");
+            auto mount = str(l, "mount");
+            if (!alias || !llabel || !mount) {
+                return unexpected{!alias ? alias.error() : !llabel ? llabel.error() : mount.error()};
+            }
+            auto mp = mount_point::parse(*mount);
+            if (!mp) {
+                return unexpected{fmt::format("UENV_SESSION: {}", mp.error())};
+            }
+            item.layers.push_back({.alias = *alias, .label = *llabel, .mount = *mp});
+        }
+        for (auto& v : *views) {
+            auto n = v.is_string() ? uenv::name::parse(v.get<std::string>())
+                                   : util::unexpected{std::string{"not a string"}};
+            if (!n) {
+                return unexpected{fmt::format("UENV_SESSION: a view: {}", n.error())};
+            }
+            item.views.push_back(*n);
+        }
+        out.push_back(std::move(item));
     }
     return out;
 }

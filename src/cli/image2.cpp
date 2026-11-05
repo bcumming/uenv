@@ -1,6 +1,7 @@
 // The `uenv image` commands for composable images: ls, add, rm, inspect,
 // compose, find, pull, push, copy, delete and attach.
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -69,7 +70,17 @@ std::string size_string(std::uint64_t b) {
     return fmt::format("{}kB", (b + 1023) / 1024);
 }
 
-json record_to_json(const object_record& r) {
+// the date of a time stamp "yyyy-mm-ddThh:mm:ssZ": "yyyy-mm-dd"
+std::string date_string(const std::string& added) {
+    return added.substr(0, added.find('T'));
+}
+
+// the time of a record: in a local repository the time of the add (not
+// shown in the table), in a catalogue the time of the push (5-discovery.md,
+// "Dates")
+enum class record_time { added, pushed };
+
+json record_to_json(const object_record& r, record_time t) {
     json layers = json::array();
     for (auto& l : r.layers) {
         layers.push_back({{"alias", l.alias.string()},
@@ -88,6 +99,9 @@ json record_to_json(const object_record& r) {
            {"digest", r.digest.string()},
            {"size", r.size},
            {"layers", layers}};
+    if (!r.added.empty()) {
+        j[t == record_time::added ? "added" : "pushed"] = r.added;
+    }
     if (r.kind == format::object_kind::layer) {
         j["building_block"] = r.standalone;
     }
@@ -98,35 +112,58 @@ json record_to_json(const object_record& r) {
     return j;
 }
 
+// the columns: uenv meta id size, and for a catalogue the date of the push
 void print_records(const std::vector<object_record>& records, bool json_out,
-                   bool no_header) {
+                   bool no_header, record_time t) {
     if (json_out) {
         json j = json::array();
         for (auto& r : records) {
-            j.push_back(record_to_json(r));
+            j.push_back(record_to_json(r, t));
         }
         term::msg("{}", j.dump(2));
         return;
     }
-    if (!no_header) {
-        term::msg("{:<36} {:<28} {:<16} {:>8} {}", "uenv", "meta", "id", "size",
-                  "layers");
-    }
+    // each column is as wide as its widest value
+    const bool dates = t == record_time::pushed;
+    struct row {
+        std::string uenv, meta, id, size, date;
+    };
+    std::vector<row> rows;
+    row width{"uenv", "meta", "id", "size", "date"};
     for (auto& r : records) {
-        std::string extra;
-        if (r.kind == format::object_kind::layer) {
-            extra = r.standalone ? "building block" : "in an image";
-        } else {
-            std::vector<std::string> ls;
-            for (auto& l : r.layers) {
-                ls.push_back(l.alias.string());
-            }
-            extra = fmt::format("{}", fmt::join(ls, ","));
+        rows.push_back({(r.kind == format::object_kind::layer ? "+" : "") +
+                            label_of(r.cfg),
+                        meta_string(r.cfg), r.id, size_string(r.size),
+                        date_string(r.added)});
+    }
+    auto w = [&](auto field) {
+        std::size_t n = (width.*field).size();
+        for (auto& x : rows) {
+            n = std::max(n, (x.*field).size());
         }
-        term::msg("{:<36} {:<28} {:<16} {:>8} {}",
-                  (r.kind == format::object_kind::layer ? "+" : "") +
-                      label_of(r.cfg),
-                  meta_string(r.cfg), r.id, size_string(r.size), extra);
+        return n;
+    };
+    const auto wu = w(&row::uenv), wm = w(&row::meta), wi = w(&row::id),
+               ws = w(&row::size);
+    auto print = [&](const row& x) {
+        auto line = fmt::format("{:<{}}  {:<{}}  {:<{}}  {:>{}}", x.uenv, wu,
+                                x.meta, wm, x.id, wi, x.size, ws);
+        if (dates) {
+            line += "  " + x.date;
+        }
+        term::msg("{}", line);
+    };
+    if (!no_header) {
+        // the header in yellow, as v1 does: pad first, then color
+        auto line = fmt::format("{:<{}}  {:<{}}  {:<{}}  {:>{}}", width.uenv, wu,
+                                width.meta, wm, width.id, wi, width.size, ws);
+        if (dates) {
+            line += "  " + width.date;
+        }
+        term::msg("{}", color::yellow(line));
+    }
+    for (auto& x : rows) {
+        print(x);
     }
 }
 
@@ -156,6 +193,8 @@ struct ls_args {
     std::optional<std::string> label;
     bool json = false;
     bool no_header = false;
+    // layers: also the layers that are only inside images
+    bool all = false;
 };
 
 int image_ls(const ls_args& args, const global_settings& settings) {
@@ -186,9 +225,17 @@ int image_ls(const ls_args& args, const global_settings& settings) {
             term::error("{}", r.error());
             return 1;
         }
-        out.insert(out.end(), r->begin(), r->end());
+        for (auto& o : *r) {
+            // a layer is listed if it is a building block, or with --all
+            // (5-discovery.md, "Images and layers")
+            if (o.kind == format::object_kind::layer && !o.standalone &&
+                !args.all) {
+                continue;
+            }
+            out.push_back(o);
+        }
     }
-    print_records(out, args.json, args.no_header);
+    print_records(out, args.json, args.no_header, record_time::added);
     return 0;
 }
 
@@ -354,16 +401,19 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         term::error("{}", items.error());
         return 1;
     }
-    auto img = resolve_items(*stores, *items, false);
-    if (!img) {
-        term::error("{}", img.error());
+    auto resolved = resolve_items(*stores, *items, false);
+    if (!resolved) {
+        term::error("{}", resolved.error());
         return 1;
     }
+    auto img = &resolved->image;
     json layers = json::array();
     for (auto& l : img->layers()) {
+        // the same shape as the image views: name -> {description, env}
         json views = json::object();
         for (auto& [k, v] : l.layer.views) {
-            views[k.string()] = env_json_of(v.env);
+            views[k.string()] = {{"description", v.description},
+                                 {"env", env_json_of(v.env)}};
         }
         layers.push_back(
             {{"alias", l.alias.string()},
@@ -373,6 +423,7 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
              {"label", label_of(l.layer.config)},
              {"meta", meta_json(l.layer.config.meta)},
              {"digest", l.layer.digest() ? l.layer.digest()->string() : ""},
+             {"id", l.layer.digest() ? format::short_id(*l.layer.digest()) : ""},
              {"squashfs", l.layer.store.file ? l.layer.store.file->string() : ""},
              {"views", views}});
     }
@@ -382,7 +433,9 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         for (auto& r : v.include) {
             inc.push_back(format_as(r));
         }
-        views[format_as(k)] = {{"include", inc}, {"env", env_json_of(v.env)}};
+        views[format_as(k)] = {{"description", v.description},
+                               {"include", inc},
+                               {"env", env_json_of(v.env)}};
     }
     std::vector<std::string> defaults;
     for (auto& d : img->default_views()) {
@@ -404,21 +457,51 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         term::msg("{}", j.dump(2));
         return 0;
     }
-    term::msg("{} {}", kind, label_of(img->config()));
-    term::msg("  digest: {}", j["digest"].get<std::string>());
-    term::msg("  meta:   {}", meta_string(img->config()));
-    term::msg("  layers:");
-    for (auto& l : img->layers()) {
-        term::msg("    {:<12} {:<28} {} {}", l.alias, l.mount,
-                  label_of(l.layer.config),
-                  l.layer.relocatable ? "(relocatable)" : "");
+    // the colors of v1: a field in blue, a name in yellow, a value in cyan.
+    // The views first: they are what a user loads.
+    term::msg("{} {}", color::blue(kind), color::yellow(label_of(img->config())));
+    if (!img->config().description.empty()) {
+        term::msg("  {}", img->config().description);
     }
-    term::msg("  views: {}", fmt::join(views.items() | std::views::transform(
-                                                          [](auto&& kv) {
-                                                              return kv.key();
-                                                          }),
-                                       ", "));
-    term::msg("  default: {}", fmt::join(defaults, ","));
+    if (img->views().empty()) {
+        term::msg("  {} none", color::blue("views:"));
+    } else {
+        term::msg("  {}", color::blue("views:"));
+        for (auto& [k, v] : img->views()) {
+            const bool is_default =
+                std::find(img->default_views().begin(),
+                          img->default_views().end(),
+                          k) != img->default_views().end();
+            term::msg("    {}{}{}", color::yellow(format_as(k)),
+                      is_default ? color::red(" (default)") : std::string{},
+                      v.description.empty() ? std::string{}
+                                            : ": " + v.description);
+        }
+    }
+    term::msg("  {} {}", color::blue("digest:"),
+              color::cyan(j["digest"].get<std::string>()));
+    if (img->config().meta.empty()) {
+        term::msg("  {} none", color::blue("meta:"));
+    } else {
+        term::msg("  {}", color::blue("meta:"));
+        for (auto& [k, v] : img->config().meta) {
+            term::msg("    {}: {}", color::yellow(k.string()), color::cyan(v));
+        }
+    }
+    // each layer by its id: a squashfs file that is started directly has none
+    std::size_t wl = 0;
+    for (auto& l : img->layers()) {
+        wl = std::max(wl, label_of(l.layer.config).size());
+    }
+    term::msg("  {}", color::blue("layers:"));
+    for (auto& l : img->layers()) {
+        const auto d = l.layer.digest();
+        const std::string id = d ? format::short_id(*d) : std::string(16, '-');
+        term::msg("    {}  {}  {}{}", color::yellow(id),
+                  fmt::format("{:<{}}", label_of(l.layer.config), wl),
+                  color::cyan(l.mount.string()),
+                  l.layer.relocatable ? " (relocatable)" : "");
+    }
     return 0;
 }
 
@@ -504,7 +587,7 @@ int image_find(const find_args& args, const global_settings& settings) {
         term::error("{}", r.error());
         return 1;
     }
-    print_records(*r, args.json, args.no_header);
+    print_records(*r, args.json, args.no_header, record_time::pushed);
     return 0;
 }
 
@@ -724,6 +807,8 @@ argparse::command image_command(const global_settings& settings) {
             .complete(completion::none());
         c.add_flag("json", &ls_args::json, "print JSON");
         c.add_flag("no-header", &ls_args::no_header, "no header");
+        c.add_flag("all", &ls_args::all,
+                   "with +: also the layers that are only inside images");
         c.action([&settings](const ls_args& a) { return image_ls(a, settings); });
         image_cli.add_subcommand(std::move(c).build());
     }

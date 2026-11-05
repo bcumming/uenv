@@ -26,6 +26,8 @@ label_keys keys_of(const configuration& config);
 struct session {
     composed_image image;
     concrete_image concrete;
+    // the items of the list, with the views that the session loads
+    std::vector<session_item> items;
     std::vector<view_request> views;
     envvars::state environment;
     std::vector<std::string> mounts; // "file:mount"
@@ -40,5 +42,11 @@ prepare_session(const std::string& uenv_arg,
                 bool no_default_view, bool force, const configuration& config,
                 const envvars::state& calling_environment,
                 std::optional<std::string> forward_prefix = "SQFSMNT_FWD_");
+
+// UENV_SESSION: the items of a session, for `uenv status` (1-composition.md,
+// "Concretisation")
+std::string session_json(const std::vector<session_item>& items);
+util::expected<std::vector<session_item>, std::string>
+parse_session_json(const std::string& text);
 
 } // namespace uenv

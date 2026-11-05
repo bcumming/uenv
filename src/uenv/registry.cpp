@@ -1,3 +1,4 @@
+#include <charconv>
 #include <unistd.h>
 
 #include <algorithm>
@@ -346,6 +347,16 @@ std::string format_time(std::chrono::system_clock::time_point tp) {
     return fmt::format("{}.{:06d}Z", buf, us % 1000000);
 }
 
+// a time point as "yyyy-mm-ddThh:mm:ssZ", the form of the field `added`
+std::string iso_time(std::chrono::system_clock::time_point tp) {
+    std::time_t secs = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm{};
+    gmtime_r(&secs, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
+}
+
 // the time in an event tag, as a time point
 std::optional<std::chrono::system_clock::time_point>
 tag_time(const std::string& tag) {
@@ -358,7 +369,15 @@ tag_time(const std::string& tag) {
         return std::nullopt;
     }
     auto secs = timegm(&tm);
-    auto us = std::stol(tag.substr(18, 6));
+    if (tag[17] != '.') {
+        return std::nullopt;
+    }
+    long us = 0;
+    const char* b = tag.data() + 18;
+    if (auto [p, ec] = std::from_chars(b, b + 6, us);
+        ec != std::errc{} || p != b + 6) {
+        return std::nullopt;
+    }
     return std::chrono::system_clock::from_time_t(secs) +
            std::chrono::microseconds(us);
 }
@@ -454,6 +473,14 @@ util::expected<void, std::string> catalogue::apply(const std::string& tag,
         return unexpected{rec.error()};
     }
     if (op == "add") {
+        // the date of the push: the time of the event (5-discovery.md,
+        // "Dates"). It is not in the object.
+        auto t = tag_time(tag);
+        if (!t) {
+            return unexpected{
+                fmt::format("the catalogue event {} has no valid time", tag)};
+        }
+        rec->added = iso_time(*t);
         rec->repository = repo;
         rec->tag = ev.value("tag", "");
         if (auto r = db_.add(*rec, {}); !r) {

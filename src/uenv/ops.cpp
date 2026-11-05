@@ -607,10 +607,35 @@ compose(store& s, const nlohmann::json& spec, const label_keys& keys) {
     return write_image(s, *img);
 }
 
-util::expected<composed_image, std::string>
+namespace {
+
+// the description of an item: its layers at the mount points of the session
+session_item describe_item(const runtime_merge_item& item,
+                           session_item::kind_t kind, std::string label) {
+    auto& img = item.image;
+    session_item d{.name = item.alias.value_or(img.config().name),
+                   .kind = kind,
+                   .label = std::move(label),
+                   .digest = img.digest()};
+    for (auto& l : img.layers()) {
+        auto mount = l.mount;
+        if (item.mount && img.layers().size() == 1u) {
+            mount = *item.mount;
+        }
+        d.layers.push_back({.alias = img.layers().size() == 1u ? d.name : l.alias,
+                            .label = label_string(l.layer.config),
+                            .mount = mount});
+    }
+    return d;
+}
+
+} // namespace
+
+util::expected<resolved_items, std::string>
 resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
               bool force) {
     std::vector<runtime_merge_item> merge;
+    std::vector<session_item> described;
     for (auto& item : items) {
         if (item.file) {
             auto img = raise_from_squashfs(*item.file, item.mount);
@@ -622,6 +647,8 @@ resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
                              .image = std::move(*img),
                              .movable = true,
                              .force = force});
+            described.push_back(describe_item(
+                merge.back(), session_item::kind_t::file, item.file->string()));
             continue;
         }
         auto f = find_unique(stores, *item.query, item.text);
@@ -633,19 +660,33 @@ resolve_items(std::vector<store>& stores, const std::vector<item_spec>& items,
             return unexpected{img.error()};
         }
         const bool movable = item.query->layer;
-        if (movable && items.size() == 1u && (item.mount || item.alias)) {
-            // a layer started on its own: the mount point is an input to the
-            // raise
-            return raise_layer(img->layers().front().layer, item.mount, force,
-                               item.alias);
-        }
         merge.push_back({.alias = item.alias,
                          .mount = item.mount,
                          .image = std::move(*img),
                          .movable = movable,
                          .force = force});
+        described.push_back(describe_item(
+            merge.back(),
+            movable ? session_item::kind_t::layer : session_item::kind_t::image,
+            label_string(merge.back().image.config())));
     }
-    return runtime_merge(std::move(merge));
+    if (merge.size() == 1u && merge[0].movable && !items[0].file &&
+        (merge[0].mount || merge[0].alias)) {
+        // a layer started on its own: the mount point is an input to the
+        // raise
+        auto r = raise_layer(merge[0].image.layers().front().layer,
+                             merge[0].mount, force, merge[0].alias);
+        if (!r) {
+            return unexpected{r.error()};
+        }
+        return resolved_items{.image = std::move(*r),
+                              .items = std::move(described)};
+    }
+    auto r = runtime_merge(std::move(merge));
+    if (!r) {
+        return unexpected{r.error()};
+    }
+    return resolved_items{.image = std::move(*r), .items = std::move(described)};
 }
 
 } // namespace uenv

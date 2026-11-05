@@ -10,6 +10,7 @@
 #include <string>
 
 #include <catch2/catch_all.hpp>
+#include <fmt/core.h>
 #include <nlohmann/json.hpp>
 
 #include <uenv/format.h>
@@ -521,4 +522,68 @@ TEST_CASE("6/rollout: a read-only v1 repository does not block a v2 one",
     fs::permissions(site, fs::perms::owner_write, fs::perm_options::add);
     REQUIRE(r);
     REQUIRE(r->size() == 1u);
+}
+
+TEST_CASE("1/runtime merge: the session describes each item",
+          "[store][session]") {
+    std::vector<uenv::store> stores;
+    stores.push_back(new_store());
+    auto dir = tmpdir();
+    REQUIRE(uenv::add_squashfs(stores[0], fake_sqfs(dir, "pe"), cfg_of(prgenv()),
+                               named<std::string>({{"system", "daint"}}), false));
+    REQUIRE(uenv::add_squashfs(stores[0], fake_sqfs(dir, "t"), cfg_of(tools()),
+                               {}, true));
+    auto items = uenv::parse_item_list("prgenv-gnu,t=+tools:/opt/t", {},
+                                       std::nullopt);
+    REQUIRE(items);
+    auto r = uenv::resolve_items(stores, *items, false);
+    REQUIRE(r);
+    REQUIRE(r->image.kind() == uenv::image_kind::runtime_merge);
+    // the items, in the order of the list: not the merge
+    auto& d = r->items;
+    REQUIRE(d.size() == 2u);
+    REQUIRE(d[0].name == nm("prgenv-gnu"));
+    REQUIRE(d[0].kind == uenv::session_item::kind_t::image);
+    REQUIRE(d[0].label == "prgenv-gnu/1.0:v1");
+    REQUIRE(d[0].digest);
+    REQUIRE(d[0].layers.size() == 1u);
+    REQUIRE(d[0].layers[0].mount == mp("/user-environment"));
+    // the alias of the item, and the mount point of the session
+    REQUIRE(d[1].name == nm("t"));
+    REQUIRE(d[1].kind == uenv::session_item::kind_t::layer);
+    REQUIRE(d[1].label == "tools/1.0:v1");
+    REQUIRE(d[1].layers[0].alias == nm("t"));
+    REQUIRE(d[1].layers[0].mount == mp("/opt/t"));
+
+    // UENV_SESSION: the same items after a round trip
+    d[1].views = {nm("tools")};
+    auto back = uenv::parse_session_json(uenv::session_json(d));
+    REQUIRE(back);
+    REQUIRE(back->size() == 2u);
+    REQUIRE((*back)[0].digest == d[0].digest);
+    REQUIRE((*back)[1].name == nm("t"));
+    REQUIRE((*back)[1].kind == uenv::session_item::kind_t::layer);
+    REQUIRE((*back)[1].layers[0].mount == mp("/opt/t"));
+    REQUIRE((*back)[1].views == std::vector{nm("tools")});
+}
+
+TEST_CASE("1/concretisation: UENV_SESSION is parsed", "[session]") {
+    auto item = [](std::string name, std::string mount, std::string kind) {
+        return fmt::format(
+            R"([{{"name":"{}","kind":"{}","label":"x/1:v1","digest":null,)"
+            R"("layers":[{{"alias":"x","label":"x/1:v1","mount":"{}"}}],)"
+            R"("views":["v"]}}])",
+            name, kind, mount);
+    };
+    REQUIRE(uenv::parse_session_json(item("x", "/opt/x", "image")));
+    REQUIRE(uenv::parse_session_json(item("x", "/opt/x", "file")));
+    // each error names UENV_SESSION
+    for (auto bad : {std::string{"{}"}, std::string{"not json"},
+                     item("a:b", "/opt/x", "image"),
+                     item("x", "opt/x", "image"),
+                     item("x", "/opt/x", "merge")}) {
+        auto r = uenv::parse_session_json(bad);
+        REQUIRE(!r);
+        REQUIRE(r.error().find("UENV_SESSION") != std::string::npos);
+    }
 }

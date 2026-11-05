@@ -175,9 +175,19 @@ function json_field() {
     refute_output --partial "reltools"
     run uenv $R image ls + --no-header
     assert_output --partial "+reltools/1.0:v1"
-    assert_output --partial "building block"
-    # the layers inside images are listed too
+    # only the building blocks: --all also lists the layers inside images
+    refute_output --partial "+app/42.0:v1"
+    run uenv $R image ls + --all --no-header
     assert_output --partial "+app/42.0:v1"
+    # the columns: uenv meta id size. No date (5-discovery.md, "Dates")
+    run uenv $R image ls +
+    assert_line --regexp "^uenv +meta +id +size$"
+    assert_line --regexp "^\+reltools/1.0:v1 +built-on=arapiles +[0-9a-f]{16} +[0-9]+kB$"
+    # the time of the add is in the JSON, for scripts
+    run bash -c "uenv $R image ls --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][\"added\"][:10])'"
+    assert_output "$(date -u +%Y-%m-%d)"
+    run bash -c "uenv $R image ls + --all --json | python3 -c 'import json,sys; print(sorted((r[\"name\"], r[\"building_block\"]) for r in json.load(sys.stdin)))'"
+    assert_output "[('app', False), ('reltools', True), ('tool', False)]"
 }
 
 @test "1/mount points: a mount point that UENV_MOUNT_LIST cannot hold is refused" {
@@ -214,6 +224,45 @@ EOF
     run uenv $R run tool --view=tool -- uenv status
     assert_success
     assert_output --partial "tool"
+}
+
+@test "1/concretisation: uenv status shows the items, their views and layers" {
+    require_mount
+    add_fixtures
+    cat > "$TMP/c.json" <<'EOF'
+{"name": "my-env", "version": "1.0", "release": "v1", "meta": {},
+ "views": {"dev": {"include": ["app:app", "reltools:tools"]}}, "default_view": "dev",
+ "layers": [{"from": "app/42.0:v1#app"},
+            {"from": "+reltools", "mount": "/user-environment/modules"}]}
+EOF
+    uenv $R image compose "$TMP/c.json"
+    # inspect: the views first, and each layer by its id
+    run uenv $R image inspect my-env
+    assert_success
+    assert_line --index 1 "  views:"
+    assert_line --index 2 "    dev (default)"
+    assert_line --regexp "^    [0-9a-f]{16}  reltools/1.0:v1 +/user-environment/modules \(relocatable\)$"
+    # --json: each view has the same shape, name -> {description, env}
+    run bash -c "uenv $R image inspect my-env --json | python3 -c 'import json,sys; j=json.load(sys.stdin); l=[l for l in j[\"layers\"] if l[\"alias\"]==\"reltools\"][0]; print(sorted(l[\"views\"][\"tools\"]), sorted(j[\"views\"][\"dev\"]), len(l[\"id\"]))'"
+    assert_output "['description', 'env'] ['description', 'env', 'include'] 16"
+    # an image: its label and view, not only its layers
+    run uenv $R run my-env -- uenv status
+    assert_success
+    assert_line "uenv   my-env"
+    assert_line "  image  my-env/1.0:v1"
+    assert_line "  views  [dev]"
+    assert_line --regexp "^    reltools +reltools/1.0:v1 +/user-environment/modules$"
+    # a runtime merge: each item, with the views that it loads
+    run uenv $R run my-env,t=+reltools:/user-tools -- uenv status
+    assert_success
+    assert_line "uenv   t"
+    assert_line "  layer  reltools/1.0:v1"
+    assert_line "  views  [tools]"
+    assert_line --regexp "^    t +reltools/1.0:v1 +/user-tools$"
+    run uenv $R run my-env,t=+reltools:/user-tools -- uenv status --format=views
+    assert_output "my-env[dev],t[tools]"
+    run uenv $R run my-env,t=+reltools:/user-tools -- uenv status --format=short
+    assert_output "my-env,t"
 }
 
 @test "1/concretisation: the default view, and --no-default-view" {
@@ -526,6 +575,13 @@ PY
     run uenv image find app --no-header
     assert_success
     assert_output --partial "app/42.0:v1"
+    # find shows the date of the push: the time of the catalogue event
+    # (5-discovery.md, "Dates")
+    run uenv image find app
+    assert_line --regexp "^uenv +meta +id +size +date$"
+    assert_line --regexp "^app/42.0:v1 .* $(date -u +%Y-%m-%d)$"
+    run bash -c "uenv image find app --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][\"pushed\"][:10])'"
+    assert_output "$(date -u +%Y-%m-%d)"
     uenv repo create "$TMP/r2"
     run uenv --repo="$TMP/r2" image pull app/42.0:v1
     assert_success
@@ -559,6 +615,9 @@ EOF
     assert_success
     run uenv --repo="$TMP/r2" image inspect my-env
     assert_output --partial "/user-environment/modules"
+    # the meta: one line for each key
+    assert_line "  meta:"
+    assert_line "    system: arapiles"
 }
 
 @test "4/copy: deploy an image, and deploy it on one more system" {

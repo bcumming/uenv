@@ -14,6 +14,7 @@
 
 #include <uenv/env.h>
 #include <uenv/parse.h>
+#include <uenv/session.h>
 #include <uenv/telemetry.h>
 #include <util/strings.h>
 
@@ -60,6 +61,60 @@ argparse::command status_command(const global_settings& settings) {
 
 namespace {
 
+// print the items of UENV_SESSION (1-composition.md, "Concretisation")
+void print_session(const std::vector<session_item>& items, status_format f) {
+    using enum status_format;
+    auto views_of = [](const session_item& d) {
+        std::vector<std::string> v;
+        for (auto& x : d.views) {
+            v.push_back(color::cyan(x.string()));
+        }
+        return v;
+    };
+    if (f == name) {
+        std::vector<std::string> v;
+        for (auto& d : items) {
+            v.push_back(d.name.string());
+        }
+        term::msg("{}", fmt::join(v, ","));
+        return;
+    }
+    if (f == views) {
+        std::vector<std::string> v;
+        for (auto& d : items) {
+            v.push_back(d.views.empty()
+                            ? color::yellow(d.name.string())
+                            : fmt::format("{}[{}]", color::yellow(d.name.string()),
+                                          fmt::join(views_of(d), ",")));
+        }
+        term::msg("{}", fmt::join(v, ","));
+        return;
+    }
+    // the widths of the columns of the layers, over all items
+    std::size_t wa = 0, wl = 0;
+    for (auto& d : items) {
+        for (auto& l : d.layers) {
+            wa = std::max(wa, l.alias.string().size());
+            wl = std::max(wl, l.label.size());
+        }
+    }
+    for (auto& d : items) {
+        const char* kind = d.kind == session_item::kind_t::layer ? "layer"
+                           : d.kind == session_item::kind_t::file ? "file "
+                                                                  : "image";
+        term::msg("uenv   {}", color::yellow(d.name.string()));
+        term::msg("  {}  {}", kind, color::cyan(d.label));
+        term::msg("  views  [{}]", fmt::join(views_of(d), ", "));
+        term::msg("  layers");
+        for (auto& l : d.layers) {
+            term::msg("    {}  {}  {}",
+                      color::yellow(fmt::format("{:<{}}", l.alias.string(), wa)),
+                      fmt::format("{:<{}}", l.label, wl),
+                      color::cyan(l.mount.string()));
+        }
+    }
+}
+
 int status([[maybe_unused]] const status_args& args,
            [[maybe_unused]] const global_settings& settings) {
     spdlog::info("uenv status");
@@ -71,6 +126,18 @@ int status([[maybe_unused]] const status_args& args,
             term::msg("there is no uenv loaded");
         }
         return args.error_if_unset ? 1 : 0;
+    }
+
+    // the items of the session. A v1 session, or a session of an older uenv,
+    // has no UENV_SESSION: then show the mounts of UENV_TELEMETRY
+    if (auto v = settings.calling_environment.get("UENV_SESSION")) {
+        if (auto items = parse_session_json(*v)) {
+            print_session(*items, args.format);
+            return 0;
+        } else {
+            spdlog::warn("{}: the mounts of UENV_TELEMETRY are shown",
+                         items.error());
+        }
     }
 
     auto telemetry = uenv::telemetry_from_env(settings.calling_environment);
