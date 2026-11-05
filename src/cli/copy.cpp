@@ -1,256 +1,85 @@
-// vim: ts=4 sts=4 sw=4 et
+// `uenv image copy`: copy an image in a registry, or to a different
+// registry.
 
-#include <filesystem>
+#include <optional>
 #include <string>
+#include <vector>
 
+#include <argparse/argparse.h>
 #include <fmt/core.h>
-#include <fmt/ranges.h>
-#include <fmt/std.h>
-#include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 
-#include <oci/auth.h>
-#include <oci/client.h>
-#include <oci/push.h>
 #include <uenv/parse.h>
-#include <uenv/print.h>
-#include <uenv/repository.h>
-#include <util/curl.h>
-#include <util/expected.h>
-#include <util/fs.h>
-#include <util/signal.h>
+#include <uenv/registry.h>
 
-#include "copy.h"
-#include "help.h"
+#include "image.h"
+#include "image_util.h"
 #include "terminal.h"
-#include "util.h"
 
 namespace uenv {
 
+using argparse::completion;
+
 namespace {
 
-struct image_copy_args {
-    std::string src_uenv_description;
-    std::string dst_uenv_description;
-    std::optional<std::string> token;
-    std::optional<std::string> username;
-    bool force = false;
+struct copy_args {
+    std::string source;
+    std::string destination;
+    std::optional<std::string> set;
+    std::optional<std::string> registry;
 };
 
-std::string image_copy_footer();
-
-int image_copy(const image_copy_args& args, const global_settings& settings);
+int image_copy(const copy_args& args, const global_settings& settings) {
+    auto src =
+        registry::parse_address(args.source, settings.config, args.registry);
+    if (!src) {
+        term::error("{}", src.error());
+        return 1;
+    }
+    auto dst = registry::parse_address(args.destination, settings.config,
+                                       args.registry);
+    if (!dst) {
+        term::error("{}", dst.error());
+        return 1;
+    }
+    std::vector<config_change> changes;
+    if (args.set) {
+        auto c = parse_config_changes(*args.set);
+        if (!c) {
+            term::error("{}", c.error());
+            return 1;
+        }
+        changes = std::move(*c);
+    }
+    auto ctx = cli::make_context(settings);
+    auto r = registry::copy(*src, dst->where, ctx, changes);
+    if (!r) {
+        term::error("{}", r.error());
+        return 1;
+    }
+    term::msg("copied to {}:{} digest={} ({} referrers)", r->repository, r->tag,
+              r->digest.string(), ctx.st.referrers_copied);
+    return 0;
+}
 
 } // namespace
 
 argparse::command image_copy_command(const global_settings& settings) {
-    using argparse::completion;
-    argparse::command_builder<image_copy_args> copy_cli(
-        "copy", "copy a uenv inside a remote registry");
-    copy_cli
-        .add_positional("source-uenv", &image_copy_args::src_uenv_description,
-                        "either name/version:tag, sha256 or id")
+    argparse::command_builder<copy_args> c("copy",
+                                           "copy an image in a registry");
+    c.add_positional("source", &copy_args::source, "the image")
         .required()
-        .complete(completion::custom("registry_nslabel"));
-    copy_cli
-        .add_positional("dest-uenv", &image_copy_args::dst_uenv_description,
-                        "label to copy to")
-        .required()
-        .complete(completion::custom("registry_dest"));
-    copy_cli
-        .add_option(
-            "token", &image_copy_args::token,
-            "a path that contains a TOKEN file for accessing restricted uenv")
-        .complete(completion::path());
-    copy_cli
-        .add_option("username", &image_copy_args::username,
-                    "user name for accessing restricted uenv.")
         .complete(completion::none());
-    copy_cli.add_flag("force", &image_copy_args::force,
-                      "overwrite the destination if it exists");
-    copy_cli.action([&settings](const image_copy_args& args) {
-        return image_copy(args, settings);
-    });
-
-    copy_cli.footer(image_copy_footer);
-
-    return std::move(copy_cli).build();
+    c.add_positional("destination", &copy_args::destination, "reg[/ns]::")
+        .required()
+        .complete(completion::none());
+    c.add_option("set", &copy_args::set,
+                 "changes: release=v2,meta.system=santis")
+        .complete(completion::none());
+    c.add_option("registry", &copy_args::registry, "a registry")
+        .complete(completion::none());
+    c.action(
+        [&settings](const copy_args& a) { return image_copy(a, settings); });
+    return std::move(c).build();
 }
-
-namespace {
-
-int image_copy([[maybe_unused]] const image_copy_args& args,
-               [[maybe_unused]] const global_settings& settings) {
-    if (!settings.config.registry) {
-        term::error("registry is not configured: add a [registry] section to "
-                    "your uenv configuration file");
-        return 1;
-    }
-    const auto& registry_cfg = *settings.config.registry;
-
-    std::optional<oci::credentials> credentials;
-    if (auto c = resolve_registry_credentials(settings.calling_environment,
-                                              registry_cfg.url, args.username,
-                                              args.token)) {
-        credentials = *c;
-    } else {
-        term::error("{}", c.error());
-        return 1;
-    }
-
-    uenv_nslabel src_label{};
-    if (const auto parse = parse_uenv_nslabel(args.src_uenv_description)) {
-        src_label = *parse;
-    } else {
-        term::error("invalid source: {}", parse.error().message());
-        return 1;
-    }
-    if (!src_label.nspace || !src_label.label.name) {
-        term::error("the source uenv {} must provide at least a namespace and "
-                    "name, e.g. 'build::f7076704830c8de7'",
-                    args.src_uenv_description);
-        return 1;
-    }
-    spdlog::debug("source label {}::{}", src_label.nspace, src_label.label);
-
-    uenv_nslabel dst_label{};
-    if (const auto parse = parse_uenv_nslabel(args.dst_uenv_description)) {
-        dst_label = *parse;
-    } else {
-        term::error("invalid destination: {}", parse.error().message());
-        return 1;
-    }
-    spdlog::debug("destination label {}::{}", dst_label.nspace,
-                  dst_label.label);
-    if (!dst_label.nspace) {
-        term::error("the destination uenv {} must provide at least a "
-                    "namespace and name, e.g. 'deploy::'",
-                    args.dst_uenv_description);
-        return 1;
-    }
-
-    auto src_registry = fetch_registry_listing(settings, *src_label.nspace);
-    if (!src_registry) {
-        term::error("unable to get a listing of the uenv: {}",
-                    src_registry.error());
-        return 1;
-    }
-
-    // search db for matching records
-    const auto src_matches = src_registry->query(src_label.label);
-    if (!src_matches) {
-        term::error("invalid search term: {}", src_registry.error());
-        return 1;
-    }
-    // check that there is one record with a unique sha
-    if (src_matches->empty()) {
-        using enum help::block::admonition;
-        term::error("no uenv found that matches '{}'\n\n{}",
-                    args.src_uenv_description,
-                    help::block(info, "try searching for the uenv to copy "
-                                      "first using 'uenv image find'"));
-        return 1;
-    } else if (!src_matches->unique_sha()) {
-        std::string errmsg =
-            fmt::format("more than one uenv found that matches '{}':\n",
-                        args.src_uenv_description);
-        errmsg += format_record_set_table(*src_matches);
-        term::error("{}", errmsg);
-        return 1;
-    }
-
-    // pick a record to use for pulling
-    const auto src_record = *(src_matches->begin());
-    spdlog::info("source record: {} {}", src_record.sha, src_record);
-
-    // create the destination record
-    auto dst_record = src_record;
-    {
-        const auto& dl = dst_label.label;
-        if (dl.name) {
-            dst_record.name = *(dl.name);
-        }
-        if (dl.tag) {
-            dst_record.tag = *(dl.tag);
-        }
-        if (dl.version) {
-            dst_record.version = *(dl.version);
-        }
-        if (dl.system) {
-            dst_record.system = *(dl.system);
-        }
-        if (dl.uarch) {
-            dst_record.uarch = *(dl.uarch);
-        }
-    }
-
-    if (dst_record == src_record) {
-        term::error("the source and destination are the same");
-        return 1;
-    }
-
-    spdlog::info("destination record: {} {}", dst_record.sha, dst_record);
-
-    // check whether the destination already exists
-    auto dst_registry = fetch_registry_listing(settings, *dst_label.nspace);
-    if (dst_registry && dst_registry->contains(dst_record)) {
-        if (!args.force) {
-            term::error("the destination already exists - use the --force flag "
-                        "to copy anyway");
-            return 1;
-        }
-        term::warn("the destination already exists and will be overwritten");
-    }
-
-    // split the configured registry into a base URL + prefix, then build the
-    // source and destination OCI repository paths (the addresses oras used).
-    const auto loc = oci::split_registry(registry_cfg.url);
-    const auto src_repo = oci::repository_path(
-        loc.prefix, src_label.nspace.value(), src_record.system,
-        src_record.uarch, src_record.name, src_record.version);
-    const auto dst_repo = oci::repository_path(
-        loc.prefix, dst_label.nspace.value(), dst_record.system,
-        dst_record.uarch, dst_record.name, dst_record.version);
-    const auto src_manifest = oci::digest::sha256(src_record.sha);
-    spdlog::debug("oci copy: {} -> {} (tag {})", src_repo, dst_repo,
-                  dst_record.tag);
-
-    if (auto result =
-            oci::copy_image(loc.base, src_repo, dst_repo, src_manifest,
-                            dst_record.tag, credentials);
-        !result) {
-        term::error("unable to copy uenv.\n{}", result.error());
-        return 1;
-    }
-
-    term::msg("copied {}::{}", src_label.nspace.value(), src_record);
-    term::msg("to     {}::{}", dst_label.nspace.value(), dst_record);
-
-    return 0;
-}
-
-std::string image_copy_footer() {
-    using enum help::block::admonition;
-    std::vector<help::item> items{
-        // clang-format off
-        help::block{none, "Copy a uenv to a new location inside a remote registry." },
-        help::linebreak{},
-        help::linebreak{},
-        help::block{xmpl, "deploy a uenv from build to deploy namespace"},
-        help::block{code,   "uenv image copy prgenv-gnu/24.11:1551223269@todi%gh200 deploy:::v1"},
-        help::block{code,   "uenv image copy 7890d67458ce7deb deploy:::v1"},
-        help::block{none, "when deploying a build, provide a tag."},
-        help::linebreak{},
-        help::block{xmpl, "redeploy a uenv to a new vcluster"},
-        help::block{code,   "uenv image copy 7890d67458ce7deb deploy::@daint"},
-        help::block{code,   "uenv image copy 7890d67458ce7deb @daint"},
-        help::block{none, "in this case, the uenv will deployed with the current tag."},
-        // clang-format on
-    };
-
-    return fmt::format("{}", fmt::join(items, "\n"));
-}
-
-} // namespace
 
 } // namespace uenv

@@ -1,333 +1,170 @@
-// vim: ts=4 sts=4 sw=4 et
+// `uenv image inspect` and `uenv inspect`: show an image, a layer, or a
+// list of them.
 
+#include <algorithm>
 #include <string>
+#include <vector>
 
+#include <argparse/argparse.h>
 #include <fmt/core.h>
-#include <fmt/ranges.h>
-#include <fmt/std.h>
 #include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 
-#include <site/site.h>
-#include <uenv/env.h>
+#include <uenv/format.h>
+#include <uenv/ops.h>
 #include <uenv/parse.h>
-#include <uenv/repository.h>
-#include <util/color.h>
-#include <util/expected.h>
-#include <util/fs.h>
+#include <uenv/session.h>
 
-#include "help.h"
-#include "inspect.h"
+#include "image.h"
+#include "image_util.h"
 #include "terminal.h"
 
 namespace uenv {
 
+using json = nlohmann::json;
+using argparse::completion;
+
 namespace {
 
-struct image_inspect_args {
+struct inspect_args {
     std::string uenv;
     bool json = false;
-    std::optional<std::string> format;
 };
 
-std::string image_inspect_footer();
-
-int image_inspect(const image_inspect_args& args,
-                  const global_settings& settings);
-
-} // namespace
-
-argparse::command image_inspect_command(const global_settings& settings) {
-    using argparse::completion;
-    argparse::command_builder<image_inspect_args> inspect_cli(
-        "inspect", "print information about a uenv.");
-    inspect_cli
-        .add_option("format", &image_inspect_args::format, "the format string.")
-        .complete(completion::none());
-    inspect_cli.add_flag("json", &image_inspect_args::json,
-                         "format output as JSON.");
-    inspect_cli
-        .add_positional("uenv", &image_inspect_args::uenv,
-                        "the uenv to inspect.")
-        .required()
-        .complete(completion::custom("uenv"));
-    inspect_cli.action([&settings](const image_inspect_args& args) {
-        return image_inspect(args, settings);
-    });
-
-    inspect_cli.footer(image_inspect_footer);
-
-    return std::move(inspect_cli).build();
-}
-
-namespace {
-
-int image_inspect(const image_inspect_args& args,
-                  const global_settings& settings) {
-    spdlog::info("image inspect {}", args.uenv);
-
-    // parse input as either a label or a file path
-    uenv_description desc;
-    if (const auto parse = parse_uenv_description(args.uenv); !parse) {
-        term::error("invalid uenv specification: {}", parse.error().message());
-        return 1;
-    } else {
-        desc = parse.value();
-    }
-
-    desc = apply_system(desc, settings.config.system_name);
-
-    // Resolve the uenv to get full information including metadata
-    auto info_result = resolve_uenv(desc, settings.config.repos);
-    if (!info_result) {
-        term::error("{}", info_result.error());
-        term::hint("{}",
-                   (settings.config.repos.empty() ? messages::no_repos()
-                                                  : messages::no_matches()));
+int image_inspect(const inspect_args& args, const global_settings& settings) {
+    auto stores = open_stores(settings.config);
+    if (!stores) {
+        term::error("{}", stores.error());
         return 1;
     }
-    const auto& info = *info_result;
-
-    // --json and --format flags are mutually inconsistent
-    if (args.json && args.format) {
-        term::error(
-            "the --json and --format flag can't be set at the same time.");
+    auto items = parse_item_list(args.uenv, keys_of(settings.config),
+                                 settings.config.system_name);
+    if (!items) {
+        term::error("{}", items.error());
         return 1;
     }
-
-    // expand all of the information in JSON format to create a single source of
-    // truth
-    auto value_or_none = [](const auto& x) -> nlohmann::json {
-        if (x) {
-            return x.value();
+    auto resolved = resolve_items(*stores, *items, false);
+    if (!resolved) {
+        term::error("{}", resolved.error());
+        return 1;
+    }
+    auto img = &resolved->image;
+    json layers = json::array();
+    for (auto& l : img->layers()) {
+        // the same shape as the image views: name -> {description, env}
+        json views = json::object();
+        for (auto& [k, v] : l.layer.views) {
+            views[k.string()] = {{"description", v.description},
+                                 {"env", format::env_to_json(v.env)}};
         }
-        return nullptr;
-    };
-    nlohmann::json j = {
-        // values that are always provided
-        {"sqfs", info.sqfs_path.string()},
-        {"path", info.sqfs_path.parent_path().string()},
-        {"meta", nullptr},
-        // values taken from meta data
-        {"description", nullptr},
-        {"mount", nullptr},
-        {"views", nlohmann::json::array()},
-        {"default-view", nullptr},
-        // values taken from repo database
-        {"name", nullptr},
-        {"version", nullptr},
-        {"tag", nullptr},
-        {"digest", nullptr},
-        {"id", nullptr},
-        {"date", nullptr},
-        {"system", nullptr},
-        {"uarch", nullptr},
-        // repo provenance (null for squashfs file path inputs)
-        {"repo", nullptr},
-    };
-
-    if (info.meta_path && !util::is_temp_dir(info.meta_path.value())) {
-        j["meta"] = info.meta_path->string();
+        layers.push_back(
+            {{"alias", l.alias.string()},
+             {"mount", l.mount.string()},
+             {"build_mount", l.layer.mount.string()},
+             {"relocatable", l.layer.relocatable},
+             {"label", label_string(l.layer.config)},
+             {"meta", cli::meta_json(l.layer.config.meta)},
+             {"digest", l.layer.digest() ? l.layer.digest()->string() : ""},
+             {"id",
+              l.layer.digest() ? format::short_id(*l.layer.digest()) : ""},
+             {"squashfs",
+              l.layer.store.file ? l.layer.store.file->string() : ""},
+             {"views", views}});
     }
-
-    // the name given to the uenv is the name from the databse (record) if the
-    // image is from a repo.
-    // otherwise use the meta data name, if it was provided
-    if (info.record || info.meta) {
-        j["name"] = info.record ? info.record->name : info.meta->name;
-    }
-
-    if (info.record) {
-        const auto& r = info.record.value();
-        j["version"] = r.version;
-        j["tag"] = r.tag;
-        j["digest"] = fmt::format("{}", r.sha);
-        j["id"] = fmt::format("{}", r.id);
-        j["date"] = fmt::format("{}", r.date);
-        j["system"] = r.system;
-        j["uarch"] = r.uarch;
-    }
-
-    if (info.meta) {
-        j["description"] = value_or_none(info.meta->description);
-        j["mount"] = info.meta->mount;
-        // TODO: only set meta path if it was not temporarily expanded
-        for (const auto& [_, view] : info.meta->views) {
-            j["views"].push_back(
-                {{"name", view.name}, {"description", view.description}});
+    json views = json::object();
+    for (auto& [k, v] : img->views()) {
+        json inc = json::array();
+        for (auto& r : v.include) {
+            inc.push_back(format_as(r));
         }
-        if (info.meta->default_view) {
-            j["default-view"] = info.meta->default_view.value();
-        }
+        views[format_as(k)] = {{"description", v.description},
+                               {"include", inc},
+                               {"env", format::env_to_json(v.env)}};
     }
-
-    if (info.repo) {
-        j["repo"] = {{"name", info.repo->name},
-                     {"path", info.repo->path.string()}};
+    std::vector<std::string> defaults;
+    for (auto& d : img->default_views()) {
+        defaults.push_back(format_as(d));
     }
-
-    // we use the name from the metadata, not the name from from repo record.
-    // create a warning when the name does not match?
-
-    if (info.record && info.meta && info.record->name != info.meta->name) {
-        spdlog::warn(
-            "the repo and meta data set different names: '{}' and '{}'",
-            info.record->name, info.meta->name);
-    }
-
-    // mode 1: JSON output
+    const std::string kind = img->kind() == uenv::image_kind::layer ? "layer"
+                             : img->kind() == uenv::image_kind::runtime_merge
+                                 ? "runtime merge"
+                                 : "image";
+    json j{{"kind", kind},
+           {"label", label_string(img->config())},
+           {"description", img->config().description},
+           {"meta", cli::meta_json(img->config().meta)},
+           {"digest", img->digest() ? img->digest()->string() : ""},
+           {"layers", layers},
+           {"views", views},
+           {"default_views", defaults}};
     if (args.json) {
-        fmt::print("{}\n", j.dump(2));
+        term::msg("{}", j.dump(2));
+        return 0;
     }
-    // custom format string
-    else if (args.format) {
-        // Format views as a comma-separated string for custom format
-        std::string views_str = "";
-        if (info.meta) {
-            std::vector<std::string> view_list;
-            for (const auto& [_, view] : info.meta->views) {
-                view_list.push_back(
-                    fmt::format("{} ({})", view.name, view.description));
-            }
-            views_str = fmt::format("{}", fmt::join(view_list, ", "));
-        }
-
-        try {
-            spdlog::debug("inspect format string: '{}'", *args.format);
-            auto getvalue = [&j](const auto& idx) -> std::string {
-                if (j[idx].is_null()) {
-                    return "none";
-                }
-                return j[idx];
-            };
-
-            auto repo_name = info.repo ? info.repo->name : "none";
-            auto repo_path =
-                info.repo ? info.repo->path.string() : std::string("none");
-
-            // clang-format off
-            auto msg = fmt::format(
-                fmt::runtime(*args.format),
-                fmt::arg("name",      getvalue("name")),
-                fmt::arg("version",   getvalue("version")),
-                fmt::arg("tag",       getvalue("tag")),
-                fmt::arg("id",        getvalue("id")),
-                fmt::arg("digest",    getvalue("digest")),
-                fmt::arg("sha256",    getvalue("digest")),
-                fmt::arg("date",      getvalue("date")),
-                fmt::arg("system",    getvalue("system")),
-                fmt::arg("uarch",     getvalue("uarch")),
-                fmt::arg("path",      getvalue("path")),
-                fmt::arg("sqfs",      getvalue("sqfs")),
-                fmt::arg("meta",      getvalue("meta")),
-                fmt::arg("mount",     getvalue("mount")),
-                fmt::arg("description", getvalue("description")),
-                fmt::arg("views",     views_str),
-                fmt::arg("repo",      repo_name),
-                fmt::arg("repo_path", repo_path)
-            );
-            // clang-format on
-            fmt::print("{}\n", msg);
-        } catch (fmt::format_error& e) {
-            spdlog::error("error formatting output: {}", e.what());
-            term::error("unable to format output: {}", e.what());
-            return 1;
+    // the colors of v1: a field in blue, a name in yellow, a value in cyan.
+    // The views first: they are what a user loads.
+    term::msg("{} {}", color::blue(kind),
+              color::yellow(label_string(img->config())));
+    if (!img->config().description.empty()) {
+        term::msg("  {}", img->config().description);
+    }
+    if (img->views().empty()) {
+        term::msg("  {} none", color::blue("views:"));
+    } else {
+        term::msg("  {}", color::blue("views:"));
+        for (auto& [k, v] : img->views()) {
+            const bool is_default = std::find(img->default_views().begin(),
+                                              img->default_views().end(),
+                                              k) != img->default_views().end();
+            term::msg("    {}{}{}", color::yellow(format_as(k)),
+                      is_default ? color::red(" (default)") : std::string{},
+                      v.description.empty() ? std::string{}
+                                            : ": " + v.description);
         }
     }
-
-    // default structured output
-    else {
-        const std::string label_str =
-            info.record ? fmt::format("{}", info.record.value())
-                        : info.sqfs_path.string();
-        if (info.repo) {
-            fmt::print("{} {}:{}\n", color::blue("repo"),
-                       color::yellow(info.repo->name),
-                       color::cyan(info.repo->path.string()));
+    term::msg("  {} {}", color::blue("digest:"),
+              color::cyan(j["digest"].get<std::string>()));
+    if (img->config().meta.empty()) {
+        term::msg("  {} none", color::blue("meta:"));
+    } else {
+        term::msg("  {}", color::blue("meta:"));
+        for (auto& [k, v] : img->config().meta) {
+            term::msg("    {}: {}", color::yellow(k.string()), color::cyan(v));
         }
-        if (info.meta) {
-            fmt::print("{} mount at {}\n", color::yellow(label_str),
-                       color::cyan(info.meta->mount));
-            const auto& views = info.meta->views;
-            const std::string default_view =
-                info.meta->default_view ? info.meta->default_view.value()
-                                        : std::string("");
-            if (!views.empty()) {
-                term::msg("{}:", color::blue("views"));
-                for (const auto& [_, view] : views) {
-                    fmt::print("  {}: {}\n",
-                               (view.name != default_view
-                                    ? color::yellow(view.name)
-                                    : color::yellow(view.name) +
-                                          color::red(" (default)")),
-                               view.description);
-                }
-            } else {
-                fmt::print("views: none\n");
-            }
-        } else {
-            fmt::print(
-                "{} can be mounted, but it has no set mount point or views\n",
-                label_str);
-        }
+    }
+    // each layer by its alias, the name that views and compose files use,
+    // then its id: a squashfs file that is started directly has no id
+    std::size_t wa = 0;
+    std::size_t wl = 0;
+    for (auto& l : img->layers()) {
+        wa = std::max(wa, l.alias.string().size());
+        wl = std::max(wl, label_string(l.layer.config).size());
+    }
+    term::msg("  {}", color::blue("layers:"));
+    for (auto& l : img->layers()) {
+        const auto d = l.layer.digest();
+        const std::string id = d ? format::short_id(*d) : std::string(16, '-');
+        term::msg("    {}  {}  {}  {}{}",
+                  color::yellow(fmt::format("{:<{}}", l.alias.string(), wa)),
+                  id, fmt::format("{:<{}}", label_string(l.layer.config), wl),
+                  color::cyan(l.mount.string()),
+                  l.layer.relocatable ? " (relocatable)" : "");
     }
     return 0;
 }
 
-std::string image_inspect_footer() {
-    using enum help::block::admonition;
-    std::vector<help::item> items{
-        // clang-format off
-        help::block{none, "Display detailed information about a uenv." },
-        help::linebreak{},
-        help::block{xmpl, "inspect a uenv using a label"},
-        help::block{code,   "uenv image inspect prgenv-gnu/24.7:v1"},
-        help::block{none, "output:"},
-        help::block{none, "  prgenv-gnu/24.7:v1@santis%gh200 mounted at /user-environment"},
-        help::block{none, "  views:"},
-        help::block{none, "    default: a default environment"},
-        help::block{none, "    develop: the development view"},
-        help::linebreak{},
-        help::block{xmpl, "inspect with JSON output"},
-        help::block{code,   "uenv image inspect --json prgenv-gnu/24.7:v1"},
-        help::linebreak{},
-        help::block{xmpl, "inspect a uenv from a squashfs file path"},
-        help::block{code,   "uenv image inspect /path/to/store.squashfs"},
-        help::linebreak{},
-        help::block{xmpl, "use a custom format string"},
-        help::block{code,   "uenv image inspect --format='image {name} at {mount}' prgenv-gnu"},
-        help::linebreak{},
-        help::block{note, "when using a label, it must uniquely identify the uenv."},
-        help::block{none, "If more than one uenv matches the label, an error message is printed."},
-        help::linebreak{},
-        help::block{info, "Output modes:"},
-        help::block{none, "  default:  structured output showing label, mount point, and views"},
-        help::block{none, "  --json:   JSON format with views as array of {name, description}"},
-        help::block{none, "  --format: custom format string using variables below"},
-        help::linebreak{},
-        help::block{info, "format string variables (for use with --format):"},
-        help::block{none, "    name:        name from metadata (\"none\" if no metadata)"},
-        help::block{none, "    description: description from metadata"},
-        help::block{none, "    mount:       mount point from metadata"},
-        help::block{none, "    views:       comma-separated list of views with descriptions"},
-        help::block{none, "    version:     version (only available for labels)"},
-        help::block{none, "    tag:         tag (only available for labels)"},
-        help::block{none, "    id:          the 16 digit image id (only available for labels)"},
-        help::block{none, "    sha256:      the unique sha256 hash"},
-        help::block{none, "    date:        creation date (only for labels)"},
-        help::block{none, "    system:      the system the uenv was built for (only for labels)"},
-        help::block{none, "    uarch:       the micro-architecture (only for labels)"},
-        help::block{none, "    path:        absolute path where the uenv is stored"},
-        help::block{none, "    sqfs:        absolute path of the squashfs file"},
-        help::block{none, "    meta:        absolute path of the metadata directory"},
-        help::block{none, "    repo:        name of the repo the uenv was found in (\"none\" for file paths)"},
-        help::block{none, "    repo_path:   path of the repo the uenv was found in (\"none\" for file paths)"},
-        // clang-format on
-    };
-
-    return fmt::format("{}", fmt::join(items, "\n"));
-}
-
 } // namespace
+
+argparse::command image_inspect_command(const global_settings& settings) {
+    argparse::command_builder<inspect_args> c(
+        "inspect", "show an image, a layer, or a list of them");
+    c.add_positional("uenv", &inspect_args::uenv, "a label, list or file")
+        .required()
+        .complete(completion::custom("uenv_list"));
+    c.add_flag("json", &inspect_args::json, "print JSON");
+    c.action([&settings](const inspect_args& a) {
+        return image_inspect(a, settings);
+    });
+    return std::move(c).build();
+}
 
 } // namespace uenv

@@ -1,170 +1,82 @@
-// vim: ts=4 sts=4 sw=4 et
+// `uenv image find`: find images and layers in the catalogue of a
+// registry.
 
+#include <optional>
 #include <string>
 
+#include <argparse/argparse.h>
 #include <fmt/core.h>
-#include <fmt/ranges.h>
-#include <fmt/std.h>
-#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
-#include <uenv/parse.h>
-#include <uenv/print.h>
-#include <uenv/repository.h>
-#include <util/curl.h>
-#include <util/expected.h>
+#include <uenv/registry.h>
+#include <uenv/store.h>
 
-#include "find.h"
-#include "help.h"
+#include "image.h"
+#include "image_util.h"
 #include "terminal.h"
-#include "util.h"
 
 namespace uenv {
 
+using argparse::completion;
+
 namespace {
 
-struct image_find_args {
-    std::optional<std::string> uenv_description;
-    std::optional<std::string> format;
-    bool no_header = false;
+struct find_args {
+    std::optional<std::string> label;
+    std::optional<std::string> registry;
     bool json = false;
-    bool no_partials = false;
+    bool no_header = false;
 };
 
-std::string image_find_footer();
-
-int image_find(const image_find_args& args, const global_settings& settings);
+int image_find(const find_args& args, const global_settings& settings) {
+    auto a = registry::parse_address(args.label.value_or(""), settings.config,
+                                     args.registry);
+    if (!a) {
+        term::error("{}", a.error());
+        return 1;
+    }
+    auto ctx = cli::make_context(settings);
+    auto cat = registry::catalogue::open(a->where, ctx);
+    if (!cat) {
+        term::error("{}", cat.error());
+        return 1;
+    }
+    auto st = cat->refresh();
+    if (!st) {
+        term::error("{}", st.error());
+        return 1;
+    }
+    spdlog::info("catalogue refresh: {} events, {} requests", st->events,
+                 st->requests);
+    // the query of the label; with no label, each image of the system
+    label_query q;
+    if (a->query) {
+        q = *a->query;
+    } else if (settings.config.system_name) {
+        q.meta[settings.config.label.at] = *settings.config.system_name;
+    }
+    auto r = cat->db().query(q);
+    if (!r) {
+        term::error("{}", r.error());
+        return 1;
+    }
+    cli::print_records(*r, args.json, args.no_header, cli::record_time::pushed);
+    return 0;
+}
 
 } // namespace
 
 argparse::command image_find_command(const global_settings& settings) {
-    using argparse::completion;
-    argparse::command_builder<image_find_args> find_cli(
-        "find", "search for uenv that can be pulled");
-    find_cli
-        .add_positional("uenv", &image_find_args::uenv_description,
-                        "search term")
-        .complete(completion::custom("registry_label"));
-    find_cli.add_flag("no-header", &image_find_args::no_header,
-                      "print only the matching records, with no header.");
-    find_cli.add_flag("json", &image_find_args::json,
-                      "format output as JSON (incompatible with --format).");
-    find_cli
-        .add_option("format", &image_find_args::format,
-                    "optional format specification (incompatible with --json).")
+    argparse::command_builder<find_args> c("find", "find images in a registry");
+    c.add_positional("label", &find_args::label, "a label")
         .complete(completion::none());
-    find_cli.add_flag("no-partials", &image_find_args::no_partials,
-                      "do not match partial names when searching.");
-    find_cli.action([&settings](const image_find_args& args) {
-        return image_find(args, settings);
-    });
-
-    find_cli.footer(image_find_footer);
-
-    return std::move(find_cli).build();
+    c.add_option("registry", &find_args::registry, "a registry")
+        .complete(completion::none());
+    c.add_flag("json", &find_args::json, "print JSON");
+    c.add_flag("no-header", &find_args::no_header, "no header");
+    c.action(
+        [&settings](const find_args& a) { return image_find(a, settings); });
+    return std::move(c).build();
 }
-
-namespace {
-
-int image_find([[maybe_unused]] const image_find_args& args,
-               [[maybe_unused]] const global_settings& settings) {
-    if (!settings.config.registry) {
-        term::error("registry is not configured: add a [registry] section to "
-                    "your uenv configuration file");
-        return 1;
-    }
-    const auto& registry_cfg = *settings.config.registry;
-
-    auto format =
-        get_record_set_format(args.no_header, args.json, (bool)args.format);
-    if (!format) {
-        term::error("{}", format.error());
-        return 1;
-    }
-
-    // find the search term that was provided by the user
-    uenv_label label{};
-    std::string nspace{registry_cfg.default_namespace};
-    if (args.uenv_description) {
-        if (const auto parse = parse_uenv_nslabel(*args.uenv_description)) {
-            label = parse->label;
-            if (parse->nspace) {
-                nspace = *parse->nspace;
-            }
-        } else {
-            term::error("invalid search term: {}", parse.error().message());
-            return 1;
-        }
-    }
-    label = apply_system(label, settings.config.system_name);
-    spdlog::info("image_find: {}::{}", nspace, label);
-
-    auto store = fetch_registry_listing(settings, nspace);
-    if (!store) {
-        term::error("unable to get a listing of the uenv: {}", store.error());
-        return 1;
-    }
-
-    // search db for matching records
-    const auto result = store->query(label, !args.no_partials);
-    if (!result) {
-        term::error("invalid search term: {}", store.error());
-        return 1;
-    }
-
-    print_record_set(
-        result.value(), format.value(),
-        format.value() == record_set_format::list ? args.format.value() : "");
-
-    return 0;
-}
-
-std::string image_find_footer() {
-    using enum help::block::admonition;
-    std::vector<help::item> items{
-        // clang-format off
-        help::block{none, "Search for uenv that are available to pull." },
-        help::linebreak{},
-        help::block{xmpl, "find all uenv"},
-        help::block{code,   "uenv image find"},
-        help::linebreak{},
-        help::block{xmpl, "find all uenv with the name prgenv-gnu"},
-        help::block{code,   "uenv image find prgenv-gnu"},
-        help::linebreak{},
-        help::block{xmpl, "find all uenv with the name prgenv-gnu and version 24.7"},
-        help::block{code,   "uenv image find prgenv-gnu/24.7"},
-        help::linebreak{},
-        help::block{xmpl, "find all uenv with the name prgenv-gnu, version 24.7 and release v2"},
-        help::block{code, "uenv image find prgenv-gnu/24.7:v2"},
-        help::linebreak{},
-        help::block{xmpl, "use the @ symbol to specify a target system name"},
-        help::block{code,   "uenv image find prgenv-gnu@todi"},
-        help::block{none, "this feature is useful when using images that were built for a different system",
-                          "than the one you are currently working on."},
-        help::linebreak{},
-        help::block{xmpl, "use the % symbol to specify a target microarchitecture (uarch)"},
-        help::block{code,   "uenv image find prgenv-gnu%gh200"},
-        help::block{none, "this feature is useful on a system with multiple uarch."},
-        help::linebreak{},
-        help::block{xmpl, "list any uenv with a concrete sha256 checksum"},
-        help::block{code,   "uenv image find 510094ddb3484e305cb8118e21cbb9c94e9aff2004f0d6499763f42bdafccfb5"},
-        help::linebreak{},
-        help::block{note, "more than one uenv might be listed if there are two uenv that refer",
-                          "to the same underlying uenv sha256."},
-        help::linebreak{},
-        help::block{xmpl, "search for uenv by id (id is the first 16 characters of the sha256)"},
-        help::block{code,   "uenv image find 510094ddb3484e30"},
-        help::linebreak{},
-        help::block{xmpl, "search for uenv in the service namespace"},
-        help::block{code,   "uenv image find service::           # all uenv"},
-        help::block{code,   "uenv image find service::prgenv-gnu # match a name"},
-        help::block{code,   "uenv image find service::%gh200     # built for gh200"},
-        // clang-format on
-    };
-
-    return fmt::format("{}", fmt::join(items, "\n"));
-}
-
-} // namespace
 
 } // namespace uenv

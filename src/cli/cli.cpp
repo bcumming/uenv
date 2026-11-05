@@ -17,7 +17,7 @@
 #include "completion.h"
 #include "config.h"
 #include "help.h"
-#include "image2.h"
+#include "image.h"
 #include "repo.h"
 #include "run.h"
 #include "start.h"

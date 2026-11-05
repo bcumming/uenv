@@ -47,7 +47,7 @@ view parsers, and the argument parser.
 | `src/uenv/registry.*`        | 4, 5              | push, pull, copy, delete, attach, catalogue                      |
 | `src/uenv/migrate.*`         | 3, 6              | `uenv repo migrate`, and the v1 images that are not migrated     |
 | `src/uenv/session.*`         | 1 "Concretisation"| the environment of `start`, `run` and the Slurm plugin           |
-| `src/cli/image2.cpp`, `repo2`| all               | `uenv image ...` and `uenv repo ...`                             |
+| `src/cli/image*`, `repo.cpp` | all               | `uenv image ...` (a file per command) and `uenv repo ...`        |
 
 The CLI replaces `uenv image ls/add/rm/inspect/find/pull/push/copy/delete`
 and `uenv repo create/status/update/migrate`. It adds `uenv image compose`

@@ -1,753 +1,191 @@
-// vim: ts=4 sts=4 sw=4 et
-#include <set>
-#include <string>
-#include <unordered_map>
-#include <vector>
+// `uenv repo`: create, status, update and migrate a repository.
 
-#include <barkeep/barkeep.h>
+#include <filesystem>
+#include <optional>
+#include <string>
+
 #include <fmt/core.h>
 #include <fmt/ranges.h>
-#include <fmt/std.h>
 #include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
 
+#include <uenv/migrate.h>
 #include <uenv/parse.h>
-#include <uenv/repository.h>
+#include <uenv/store.h>
 #include <util/expected.h>
-#include <util/fs.h>
-#include <util/lustre.h>
 
-#include "help.h"
 #include "repo.h"
 #include "terminal.h"
 #include "uenv.h"
 
 namespace uenv {
 
+namespace fs = std::filesystem;
+using argparse::completion;
+
 namespace {
 
-struct repo_create_args {
+struct repo_args {
     std::optional<std::string> path;
-};
-
-struct repo_status_args {
-    std::optional<std::string> repo;
-    // print output in json format
     bool json = false;
+    bool force = false;
 };
 
-struct repo_update_args {
-    std::string repo;
-    // whether to apply lustre checks
-    bool lustre = true;
-};
+// the path of the repository: the argument (parsed), else the user repository
+util::expected<fs::path, std::string> repo_path(const repo_args& args,
+                                                const global_settings& settings) {
+    if (args.path) {
+        return parse_file_path(*args.path);
+    }
+    if (auto r = settings.config.user_repo()) {
+        return r->path;
+    }
+    return util::unexpected{std::string{"no repository path is given"}};
+}
 
-struct repo_migrate_args {
-    std::string source;
-    std::string destination;
-    bool sync = true;
-};
+int repo_create(const repo_args& args, const global_settings& settings) {
+    auto p = repo_path(args, settings);
+    if (!p) {
+        term::error("{}", p.error());
+        return 1;
+    }
+    auto s = store::create(*p);
+    if (!s) {
+        term::error("{}", s.error());
+        return 1;
+    }
+    term::msg("the repository {} is ready", p->string());
+    return 0;
+}
 
-std::string repo_footer();
+int repo_status(const repo_args& args, const global_settings& settings) {
+    auto p = repo_path(args, settings);
+    if (!p) {
+        term::error("{}", p.error());
+        return 1;
+    }
+    // the v1 images that are not in the v2 part: no hash, no write
+    unsigned pending = 0;
+    if (has_v1_part(*p)) {
+        if (auto m = migrate_v1(*p, {.dry_run = true})) {
+            pending = m->pending;
+        }
+    }
+    auto state = inspect_repo(*p);
+    if (state == repo_layout::v1_only) {
+        term::msg("{}: v1 format, {} images. Run `uenv repo migrate`.",
+                  p->string(), pending);
+        return 0;
+    }
+    auto s = store::open(*p, true);
+    if (!s) {
+        term::error("{}", s.error());
+        return 1;
+    }
+    auto r = s->update(false, true);
+    if (!r) {
+        term::error("{}", r.error());
+        return 1;
+    }
+    auto all = s->all();
+    if (args.json) {
+        nlohmann::json j{{"path", p->string()},
+                         {"objects", all ? all->size() : 0},
+                         {"missing", r->missing.size()},
+                         {"prune", r->pruned.size()},
+                         {"recent", r->kept_recent.size()},
+                         {"parts", r->parts.size()},
+                         {"released", r->released},
+                         {"v1_not_migrated", pending}};
+        term::msg("{}", j.dump());
+        return 0;
+    }
+    term::msg("{}: {} objects", p->string(), all ? all->size() : 0);
+    for (auto& m : r->missing) {
+        term::msg("  missing blobs: {} id={}", label_string(m.cfg), m.id);
+    }
+    term::msg("  `uenv repo update` would delete {} blobs ({} bytes) and {} "
+              ".part files; {} unused blobs are newer than 24 hours",
+              r->pruned.size(), r->released, r->parts.size(),
+              r->kept_recent.size());
+    if (pending) {
+        term::msg("  {} v1 images are not migrated: run `uenv repo migrate`",
+                  pending);
+    }
+    return 0;
+}
 
-int repo_create(const repo_create_args& args, const global_settings& settings);
-int repo_status(const repo_status_args& args, const global_settings& settings);
-int repo_update(const repo_update_args& args, const global_settings& settings);
-int repo_migrate(const repo_migrate_args& args,
-                 const global_settings& settings);
+int repo_update(const repo_args& args, const global_settings& settings) {
+    auto p = repo_path(args, settings);
+    if (!p) {
+        term::error("{}", p.error());
+        return 1;
+    }
+    auto s = store::open(*p, false);
+    if (!s) {
+        term::error("{}", s.error());
+        return 1;
+    }
+    auto r = s->update(args.force, false);
+    if (!r) {
+        term::error("{}", r.error());
+        return 1;
+    }
+    term::msg("deleted {} records with missing blobs, {} blobs ({} bytes), {} "
+              ".part files",
+              r->missing.size(), r->pruned.size(), r->released,
+              r->parts.size());
+    return 0;
+}
+
+int repo_migrate(const repo_args& args, const global_settings& settings) {
+    auto p = repo_path(args, settings);
+    if (!p) {
+        term::error("{}", p.error());
+        return 1;
+    }
+    auto r = migrate_v1(*p, {},
+                        [](const std::string& m) { term::msg("{}", m); });
+    if (!r) {
+        term::error("{}", r.error());
+        return 1;
+    }
+    term::msg("migrated {} images ({} already done, {} squashfs hashed)",
+              r->migrated, r->skipped, r->hashed);
+    if (r->failed) {
+        term::error("{} images were not migrated. The other images can be "
+                    "used. Run `uenv repo migrate` again after the problem is "
+                    "fixed.\n{}",
+                    r->failed, fmt::join(r->errors, "\n"));
+        return 1;
+    }
+    return 0;
+}
 
 } // namespace
 
 argparse::command repo_command(const global_settings& settings) {
-    using argparse::completion;
-    argparse::command_builder<> repo_cli(
-        "repo", "manage and query uenv image repositories");
-
-    // add the create command, i.e. `uenv repo create ...`
-    argparse::command_builder<repo_create_args> create_cli(
-        "create", "create a new uenv repository");
-
-    // TODO: should this command really work by selecting a default location?
-    create_cli
-        .add_positional("path", &repo_create_args::path,
-                        "path of the repo to create")
-        .complete(completion::directory());
-    create_cli.action([&settings](const repo_create_args& args) {
-        return repo_create(args, settings);
-    });
-
-    // add the status command, i.e. `uenv repo status ...`
-    argparse::command_builder<repo_status_args> status_cli(
-        "status", "status of an existing uenv repository");
-    status_cli
-        .add_positional("repo", &repo_status_args::repo,
-                        "the repo (one of [path] or [name])")
-        .complete(completion::custom("repo"));
-    status_cli.add_flag("json", &repo_status_args::json,
-                        "output in json format");
-    status_cli.action([&settings](const repo_status_args& args) {
-        return repo_status(args, settings);
-    });
-
-    // add the update command, i.e. `uenv repo update ...`
-    argparse::command_builder<repo_update_args> update_cli(
-        "update", "update an existing uenv repository");
-
-    update_cli
-        .add_positional("repo", &repo_update_args::repo, "repository to update")
-        .required()
-        .complete(completion::custom("repo"));
-    update_cli
-        .add_flag("lustre", &repo_update_args::lustre,
-                  "apply lustre striping fix if applicable")
-        .negation("no-lustre");
-    update_cli.action([&settings](const repo_update_args& args) {
-        return repo_update(args, settings);
-    });
-
-    // add the update command, i.e. `uenv repo migrate ...`
-    argparse::command_builder<repo_migrate_args> migrate_cli(
-        "migrate", "migrate a repository to a new directory");
-
-    migrate_cli
-        .add_positional("source", &repo_migrate_args::source,
-                        "the source repository (one of [path] or [name])")
-        .required()
-        .complete(completion::custom("repo"));
-    migrate_cli
-        .add_positional("destination", &repo_migrate_args::destination,
-                        "path of the new repository")
-        .required()
-        .complete(completion::custom("repo"));
-    migrate_cli
-        .add_flag("sync", &repo_migrate_args::sync,
-                  "merge source uenv into an existing target repo.")
-        .negation("no-sync");
-    migrate_cli.action([&settings](const repo_migrate_args& args) {
-        return repo_migrate(args, settings);
-    });
-
-    repo_cli.add_subcommand(std::move(create_cli).build());
-    repo_cli.add_subcommand(std::move(status_cli).build());
-    repo_cli.add_subcommand(std::move(update_cli).build());
-    repo_cli.add_subcommand(std::move(migrate_cli).build());
-    repo_cli.footer(repo_footer);
-
+    argparse::command_builder<> repo_cli("repo", "manage repositories");
+    auto sub = [&](const char* name, const char* help, auto fn, bool json,
+                   bool force) {
+        argparse::command_builder<repo_args> c(name, help);
+        c.add_positional("path", &repo_args::path, "the repository")
+            .complete(completion::directory());
+        if (json) {
+            c.add_flag("json", &repo_args::json, "print JSON");
+        }
+        if (force) {
+            c.add_flag("force", &repo_args::force,
+                       "no grace period: use only when nothing writes");
+        }
+        c.action([&settings, fn](const repo_args& a) { return fn(a, settings); });
+        repo_cli.add_subcommand(std::move(c).build());
+    };
+    sub("create", "create a repository", repo_create, false, false);
+    sub("status", "check a repository", repo_status, true, false);
+    sub("update", "delete records with missing blobs, prune unused blobs",
+        repo_update, false, true);
+    sub("migrate", "convert a v1 repository", repo_migrate, false, false);
     return std::move(repo_cli).build();
 }
-
-namespace {
-
-// inspect the repo path that is optionally passed as an argument.
-// if no argument is provided, fall back to the value passed using
-// the --repo argument, which in turn falls back to the default value.
-util::expected<repo_description, std::string>
-resolve_repo(std::optional<std::string> path, const global_settings& settings) {
-    if (path) {
-        if (auto result = parse_path(*path); !result) {
-            return util::unexpected(result.error().message());
-        }
-        return repo_description{.name = "cli",
-                                .path = std::filesystem::path(*path)};
-    }
-
-    if (auto repo = settings.config.user_repo()) {
-        return repo.value();
-    }
-    return util::unexpected("no repo path provided");
-}
-
-// parse a CLI repo argument string and resolve it against the configured repo
-// list. Returns a fully resolved repo_description or an error message.
-// altname: if non-empty, used as the repo name when the argument is a bare
-// path (no explicit name), e.g. "cli", "source", "destination".
-util::expected<repo_description, std::string>
-resolve_repo_arg(const std::string& arg, const repo_list& repos,
-                 const std::string& altname = "") {
-    auto label = uenv::parse_repo_label(arg);
-    if (!label) {
-        return util::unexpected(fmt::format(
-            "invalid repository description: {}", label.error().message()));
-    }
-    auto result = repos.pick(label.value());
-    if (result && !altname.empty() && label->is_path()) {
-        result->name = altname;
-    }
-    return result;
-}
-
-struct repo_consistency {
-    // a list of all digests that have missing squashfs or store paths
-    std::unordered_map<uenv::sha256, std::vector<uenv::uenv_record>> no_storage;
-
-    // return false if the repository is not consistent
-    operator bool() const {
-        return no_storage.empty();
-    }
-};
-
-namespace impl {
-
-// check a repository for missing squashfs files, which can be caused by user
-// intervention or file system deletion policies.
-repo_consistency check_repo_consistency(const uenv::repository& store) {
-    namespace fs = std::filesystem;
-
-    // an empty query will return all uenv for all systems
-    const auto query = store.query({});
-    if (!query) {
-        term::error("unable to query database: {}", query.error());
-        return {};
-    }
-
-    repo_consistency R{};
-
-    // Only a definite "not found" or a path of the wrong type marks the
-    // storage as missing, because the stale record is then deleted. A path
-    // that can't be examined (EACCES, EIO on a network file system) must not
-    // cost the user their records.
-    auto is_missing = [](const fs::path& path, fs::file_type expected) {
-        const auto type = util::path_type(path);
-        if (!type) {
-            term::warn("unable to examine {}: {}", path.string(),
-                       type.error().message());
-            return false;
-        }
-        return *type != expected;
-    };
-
-    // for recording visited digests
-    std::set<uenv::sha256> shas;
-    for (auto& r : *query) {
-        const auto digest = r.sha;
-        // if the digest has not been encountered, test whether the
-        // corresponding squashfs storage exists
-        if (!shas.contains(digest)) {
-            shas.insert(digest);
-
-            auto p = store.uenv_paths(digest);
-
-            // record the digest if the storage path or squashfs file is missing
-            if (is_missing(p.store, fs::file_type::directory) ||
-                is_missing(p.squashfs, fs::file_type::regular)) {
-                spdlog::trace("check_repo_consistency:: {} does not exist",
-                              p.squashfs);
-                R.no_storage[digest].push_back(r);
-            } else {
-                spdlog::trace("check_repo_consistency:: {} exists", p.squashfs);
-            }
-        }
-        // the digest has already been checked
-        else {
-            // add the record to the list of records to be deleted if the digest
-            // has been marked for removal
-            if (R.no_storage.count(digest) > 0) {
-                R.no_storage[digest].push_back(r);
-            }
-        }
-    }
-
-    return R;
-}
-
-std::unordered_map<sha256, std::vector<uenv_record>>
-get_record_map(const repository& store) {
-    const auto query = store.query({});
-    if (!query) {
-        term::error("unable to query database: {}", query.error());
-        return {};
-    }
-    std::unordered_map<sha256, std::vector<uenv_record>> out;
-    for (auto& r : *query) {
-        out[r.sha].push_back(r);
-    }
-    return out;
-}
-
-} // namespace impl
-
-int repo_create(const repo_create_args& args, const global_settings& settings) {
-    auto repo = resolve_repo(args.path, settings);
-    if (!repo) {
-        term::error("invalid repository path: {}", repo.error());
-        return 1;
-    }
-    spdlog::info("attempting to create uenv repo at {}", repo->path);
-
-    if (auto result = create_repository(repo->path); !result) {
-        term::error("{}", result.error());
-        return 1;
-    }
-    term::msg("the repository {} has been created.",
-              color::yellow(repo->path.string()));
-    return 0;
-}
-
-// JSON output generates a json string like the following
-// {
-//  "repos": [
-//     {
-//       "name": "default",
-//       "path": "/scratch/.repo",
-//       "status": "readwrite",
-//       "fstype": "scratch",
-//       // list of chanages that can be applied
-//       "updates": ["lustre-striping", "storage"],
-//       // list of digests to remove (default is empty)
-//       "digest-remove": [{
-//           "digest": "aa789ssdf",
-//           "labels": ["bilby/23:v2@daint"]
-//         }
-//       ],
-//     }
-//   ]
-// }
-
-int repo_status(const repo_status_args& args, const global_settings& settings) {
-    using enum repo_state;
-
-    repo_list repos{};
-    if (args.repo) {
-        auto repo =
-            resolve_repo_arg(args.repo.value(), settings.config.repos, "cli");
-        if (!repo) {
-            term::error("{}", repo.error());
-            return 1;
-        }
-        repos.accumulate(std::vector<repo_description>{repo.value()});
-    } else {
-        repos.accumulate(settings.config.repos);
-    }
-
-    using nlohmann::json;
-    auto json_repos = json::array();
-    for (auto& repo : repos) {
-        auto status = validate_repository(repo.path);
-
-        const bool valid_repo = status == readonly || status == readwrite;
-        bool update = false;
-
-        // set to true when an update can be applied using `uenv repo update`
-        std::optional<lustre::stripe_stats> lustre_state{};
-        std::optional<repo_consistency> store_state{};
-
-        if (valid_repo) {
-            // check for lustre striping
-            if (auto p = lustre::load_path(repo.path,
-                                           settings.calling_environment)) {
-                lustre_state = lustre::is_striped(*p);
-                update |= !lustre_state.value();
-            }
-
-            // check for inconsistencies between stored images and the database
-            if (auto store = uenv::open_repository(repo.path)) {
-                if (auto c = impl::check_repo_consistency(store.value()); !c) {
-                    store_state = c;
-                    update = true;
-                }
-            } else {
-                term::error("the repository at {} could not be opened {}",
-                            repo.path, store.error());
-                return 1;
-            }
-        }
-
-        // output the results as json
-        if (args.json) {
-            json json_entry;
-            json_entry["name"] = repo.name;
-            json_entry["path"] = repo.path.string();
-            json_entry["priority"] = repo.priority;
-            json_entry["fstype"] = lustre_state ? "lustre" : "unknown";
-            json_entry["updates"] = json::array();
-            if (lustre_state && !lustre_state.value()) {
-                json_entry["updates"].push_back("lustre-striping");
-            }
-            json_entry["digest-remove"] = json::array();
-            json_entry["status"] = fmt::format("{}", status);
-            if (store_state) {
-                json_entry["updates"].push_back("storage");
-                for (const auto& [digest, records] : store_state->no_storage) {
-                    auto jlabels = json::array();
-                    for (const auto& r : records) {
-                        jlabels.push_back(fmt::format("{}", r));
-                    }
-                    json_entry["digest-remove"].push_back(
-                        {{"digest", fmt::format("{}", digest)},
-                         {"labels", jlabels}});
-                }
-            }
-
-            json_repos.push_back(json_entry);
-        }
-        // output the results in human readable form (the default)
-        else {
-            if (status == no_exist) {
-                term::msg("{}:{} is not a repository", color::yellow(repo.name),
-                          color::cyan(repo.path.string()));
-            } else {
-                term::msg("{}:{} is {}", color::yellow(repo.name),
-                          color::cyan(repo.path.string()), status);
-            }
-            if (lustre_state) {
-                if (!lustre_state.value()) {
-                    term::msg(
-                        "  - is on a lustre file system that is not striped",
-                        repo.path);
-                } else {
-                    term::msg("  - on a lustre file system");
-                }
-            }
-            if (store_state) {
-                term::msg("  - has missing uenv images:");
-                for (const auto& [digest, records] : store_state->no_storage) {
-                    for (const auto& r : records) {
-                        term::msg("    {} {}", digest, r);
-                    }
-                }
-            }
-            if (update) {
-                term::msg("\nrun '{}' to apply updates to the repository",
-                          color::yellow(
-                              fmt::format("uenv repo update {}", repo.path)));
-            }
-        }
-    }
-
-    // print a user-friendly message if not outputing json and there are no
-    // repos
-    if (!args.json && repos.empty()) {
-        term::warn("{}", messages::no_repos());
-    }
-
-    if (args.json) {
-        json output;
-        output["repos"] = json_repos;
-        term::msg("{}", output.dump());
-    }
-
-    return 0;
-}
-
-int repo_update(const repo_update_args& args, const global_settings& settings) {
-    using enum repo_state;
-
-    auto repo = resolve_repo_arg(args.repo, settings.config.repos, "cli");
-    if (!repo) {
-        term::error("{}", repo.error());
-        return 1;
-    }
-
-    auto status = validate_repository(repo->path);
-    if (status == readonly) {
-        term::error("the repository at {} is read only\n", repo->path);
-        return 1;
-    }
-    if (status == no_exist) {
-        term::error("no repository at {}\n", repo->path);
-        return 1;
-    }
-    if (status == invalid) {
-        term::error("the repository at {} is in invalid state\n", repo->path);
-        return 1;
-    }
-
-    if (args.lustre) {
-        if (auto p =
-                lustre::load_path(repo->path, settings.calling_environment)) {
-            if (!lustre::is_striped(*p)) {
-                term::msg("{} applying striping", p->path.string());
-                lustre::set_striping(*p, lustre::default_striping, true);
-            }
-        }
-    }
-
-    // check for inconsistencies between stored images and the database
-    if (auto store = uenv::open_repository(repo->path,
-                                           uenv::repo_open_mode::readwrite)) {
-        if (auto C = impl::check_repo_consistency(*store); !C) {
-            term::msg("the repository at {} has missing uenv images:",
-                      repo->path);
-            for (auto& [digest, records] : C.no_storage) {
-                term::msg("  removing stale ref {}", digest);
-                // remove the record before the files, as `image rm` does: a
-                // record must never outlive its files.
-                if (auto r = store->remove(digest); !r) {
-                    term::error("unable to remove the record {}: {}", digest,
-                                r.error());
-                    continue;
-                }
-                spdlog::debug("removed record {}", digest);
-
-                // the storage is incomplete: remove what is left of it.
-                // remove_all returns 0, without an error, if there is nothing.
-                const auto store_path = store->uenv_paths(digest).store;
-                std::error_code ec;
-                std::filesystem::remove_all(store_path, ec);
-                if (ec) {
-                    term::warn("unable to delete {}: {}", store_path,
-                               ec.message());
-                } else {
-                    spdlog::debug("removed path {}", store_path);
-                }
-            }
-        }
-    } else {
-        term::error("the repository at {} could not be opened {}", repo->path,
-                    store.error());
-        return 1;
-    }
-
-    term::msg("The repository {} is up to date", repo->path);
-
-    return 0;
-}
-
-int repo_migrate(const repo_migrate_args& args,
-                 const global_settings& settings) {
-    using enum repo_state;
-    namespace fs = std::filesystem;
-
-    auto source_result =
-        resolve_repo_arg(args.source, settings.config.repos, "source");
-    if (!source_result) {
-        term::error("source repo is not valid: {}", source_result.error());
-        return 1;
-    }
-    const auto source = source_result.value();
-
-    auto destination_result = resolve_repo_arg(
-        args.destination, settings.config.repos, "destination");
-    if (!destination_result) {
-        term::error("destination repo is not valid: {}",
-                    destination_result.error());
-        return 1;
-    }
-    const auto destination = destination_result.value();
-
-    // verify that source and destination are different locaions
-    if (destination == source) {
-        term::error("the source and destination point to the same directory {}",
-                    source.path);
-        return 1;
-    }
-
-    // validate that the source repo exists and is a valid repo
-    if (auto status = validate_repository(source.path);
-        !(status == readonly || status == readwrite)) {
-        term::error("source repo {} is not a valid repo", source);
-        return 1;
-    }
-
-    // validate the destination repo either does not exist,
-    // or is writable if the sync option is enabled.
-    const auto dest_status = validate_repository(destination.path);
-    if (args.sync && !(dest_status == no_exist || dest_status == readwrite)) {
-        term::error("destination repo {} can not be synced because it is {}.",
-                    destination,
-                    (dest_status == readonly ? "read only" : "invalid"));
-        return 1;
-    }
-    if (!args.sync && dest_status != no_exist) {
-        if (dest_status == readwrite) {
-            term::error("destination repo {} can not be migrated to because it "
-                        "already exists: use the --sync flag if you are trying "
-                        "to update the destination.",
-                        destination);
-        } else {
-            term::error("destination repo {} can not updated because it is {}.",
-                        destination,
-                        (dest_status == readonly ? "read only" : "invalid"));
-        }
-        return 1;
-    }
-
-    if (const auto src_store =
-            uenv::open_repository(source.path, uenv::repo_open_mode::readonly);
-        !src_store) {
-        term::error("the repo {} could not be opened {}", source,
-                    src_store.error());
-    } else {
-        // check that the source repo does not contain DB entries without
-        // correspnding images.
-        if (!impl::check_repo_consistency(*src_store)) {
-            term::error("the repo {} is inconsistent: fisrt run {}", source,
-                        color::cyan(fmt::format(
-                            "uenv repo update --no-lustre {}", source)));
-            return 1;
-        }
-
-        // create/open the destination repo
-        auto dst_store =
-            dest_status == no_exist
-                ? create_repository(destination.path)
-                : open_repository(destination.path, repo_open_mode::readwrite);
-
-        if (!dst_store) {
-            term::error("unable to open destination repo for migration: {}",
-                        dst_store.error());
-            return 1;
-        }
-
-        // create the images path inside the target repo
-        std::error_code ec;
-        const fs::path dst_img_path = dst_store->path().value() / "images";
-        if (fs::create_directories(dst_img_path, ec); ec) {
-            term::error("unable to create path {}: {}", dst_img_path,
-                        ec.message());
-            return 1;
-        }
-
-        const auto record_map = impl::get_record_map(*src_store);
-        int num_copies{0};
-        for (const auto& [digest, _] : record_map) {
-            const auto match =
-                dst_store->query(uenv_label{.name = digest.string()});
-            if (match->empty()) {
-                spdlog::debug("mark {} for migration", digest);
-                ++num_copies;
-            }
-        }
-
-        term::msg("migrate repo from {} to {} (copying {} images)", source,
-                  destination, num_copies);
-
-        // create a simple progress bar
-        namespace bk = barkeep;
-        using namespace std::chrono_literals;
-        int files_copied{0u};
-        auto bar = bk::ProgressBar(
-            &files_copied,
-            {
-                .total = std::max(1, num_copies), // avoid divide-by-zero
-                .style = bk::Rich,
-                .no_tty = !isatty(fileno(stdout)),
-                .show = false,
-            });
-        // only show the bar if there are squashfs files to migrate
-        if (num_copies > 0) {
-            bar->show();
-        }
-
-        // iterate over the contents of the source repo
-        for (const auto& [digest, records] : record_map) {
-            using enum std::filesystem::copy_options;
-
-            const auto src_paths = src_store->uenv_paths(digest);
-            const auto dst_paths = dst_store->uenv_paths(digest);
-
-            const auto matches =
-                dst_store->query(uenv_label{.name = digest.string()});
-
-            // copy the underlying image if it is not in the target
-            if (matches->empty()) {
-                spdlog::debug("copying {} to {}", src_paths.store,
-                              dst_paths.store);
-
-                // overwrite_existing is required to ensure that whole files are
-                // transfered when a previous migration was interrupted while
-                // copying a squashfs file
-                fs::copy(src_paths.store, dst_paths.store,
-                         recursive | overwrite_existing, ec);
-                if (ec) {
-                    term::error("unable to copy {}: {}", src_paths.store,
-                                ec.message());
-                    return 1;
-                }
-                ++files_copied;
-            }
-            // update the destination database.
-            // Perform after the file copy is complete to ensure that uenv imges
-            // exist before they are recorded in the database: important for
-            // interrupted migrations.
-            for (auto r : records) {
-                spdlog::debug("adding record {}", r);
-                // add every record unconditionally.
-                // Records already in the destination DB are a noop, and it
-                // is possible that new records can added to images that
-                // already exist in the destination.
-                if (auto result = dst_store->add(r); !result) {
-                    term::error("unable to add record {}", r);
-                    return 1;
-                }
-            }
-        }
-    }
-    term::msg("migration finished sucessfully");
-
-    return 0;
-}
-
-std::string repo_footer() {
-    using enum help::block::admonition;
-    using help::block;
-    using help::linebreak;
-    using help::lst;
-    std::vector<help::item> items{
-        // clang-format off
-        block{none, "Create, query and update uenv image repositories."},
-        linebreak{},
-        block{none, "Uenv repositories (repos) are a directory on the file system that contains"},
-        block{none, "an sqlite database with information about uenv in the repo and the squashfs"},
-        block{none, "files for each uenv in the repo."},
-        linebreak{},
-        block{note, "The default uenv repository is the repository named 'default' in the uenv"},
-        block{none, "configuration files. If none is configured, it is $SCRATCH/.uenv-images if SCRATCH"},
-        block{none, "is defined, otherwise $HOME/.uenv/repo."},
-        linebreak{},
-        block{xmpl, "To get the status of a repository"},
-        block{code,   "# status of the default repository"},
-        block{code,   "uenv repo status"},
-        block{code,   "# pass the path of a repository as an additional argument"},
-        block{code,   "uenv repo status $HOME/custom-repo"},
-        linebreak{},
-        block{note, "The 'repo status' command provides information including whether"},
-        block{none, "  - it is read-only or read-write."},
-        block{none, "  - it is on a lustre file system."},
-        block{none, "  - image files have been deleted without updating the database,"},
-        block{none, "    e.g. by scratch cleanup policies."},
-        block{none, "  - lustre striping has been applied to its contents."},
-        block{none, "See the repo update command to synchronise the database or apply striping on lustre."},
-        linebreak{},
-        block{xmpl, "The --json flag returns output in JSON format for integration into tools and scripts"},
-        block{code,   "uenv repo status --json"},
-        linebreak{},
-        block{xmpl, "The 'repo create' sub-command creates a new empty repository:"},
-        block{code,   "uenv repo create $HOME/my-repo"},
-        block{none, "will create a new repository at $HOME/my-repo."},
-        linebreak{},
-        block{note, "The path argument is optional: if it is not passed uenv will attempt to create"},
-        block{none, "a repo in the default location."},
-        linebreak{},
-        block{xmpl, "The 'repo update' sub-command applies updates and upgrades to a repository:"},
-        block{code,   "uenv repo update default"},
-        block{none, "will update the default repo."},
-        linebreak{},
-        block{code,   "uenv repo update $HOME/my-repo"},
-        block{none, "will update the repository at the custom location ~/my-repo."},
-        linebreak{},
-        block{note, "Updates are used to upgrade or update a repository, when needed. Currently two upgrades"},
-        block{none, "are applied:"},
-        block{none, "  - apply Lustre striping if the repo is on a Lustre file system and no striping"},
-        block{none, "    has already been applied. Disable this option with the --no-lustre flag."},
-        block{none, "  - remove uenv from the database if their squashfs file does not exist"},
-        block{none, "    which can occur to repos on non-default locations that are subject to"},
-        block{none, "    clean up policies."},
-        linebreak{},
-        block{xmpl, "The 'repo migrate' sub-command copies a repo to a new location:"},
-        block{code,   "uenv repo migrate $SCRATCH/.uenv-images $HOME/uenv-repo"},
-        block{none, "will copy from $SCRATCH/.uenv-images to $HOME/uenv-repo."},
-        linebreak{},
-        block{note, "'repo migrate' will accept an existing repository as the destination."},
-        block{none, "In the example above, the repo $HOME/uenv-repo can already exist, in which case"},
-        block{none, "only images from the source repo that are not in the destination will be copied."},
-        block{none, "The destination repo will be created if it does not already exist."},
-        // clang-format on
-    };
-
-    return fmt::format("{}", fmt::join(items, "\n"));
-}
-
-} // namespace
 
 } // namespace uenv
