@@ -193,7 +193,7 @@ struct ls_args {
     std::optional<std::string> label;
     bool json = false;
     bool no_header = false;
-    // layers: also the layers that are only inside images
+    // a bare +: also the layers that are only inside images
     bool all = false;
 };
 
@@ -226,10 +226,10 @@ int image_ls(const ls_args& args, const global_settings& settings) {
             return 1;
         }
         for (auto& o : *r) {
-            // a layer is listed if it is a building block, or with --all
-            // (5-discovery.md, "Images and layers")
-            if (o.kind == format::object_kind::layer && !o.standalone &&
-                !args.all) {
+            // a bare + lists the building blocks, or each layer with --all.
+            // A label lists each layer that matches it (5-discovery.md,
+            // "Images and layers")
+            if (q.layer && text == "+" && !o.standalone && !args.all) {
                 continue;
             }
             out.push_back(o);
@@ -488,17 +488,21 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
             term::msg("    {}: {}", color::yellow(k.string()), color::cyan(v));
         }
     }
-    // each layer by its id: a squashfs file that is started directly has none
+    // each layer by its alias, the name that views and compose files use,
+    // then its id: a squashfs file that is started directly has no id
+    std::size_t wa = 0;
     std::size_t wl = 0;
     for (auto& l : img->layers()) {
+        wa = std::max(wa, l.alias.string().size());
         wl = std::max(wl, label_of(l.layer.config).size());
     }
     term::msg("  {}", color::blue("layers:"));
     for (auto& l : img->layers()) {
         const auto d = l.layer.digest();
         const std::string id = d ? format::short_id(*d) : std::string(16, '-');
-        term::msg("    {}  {}  {}{}", color::yellow(id),
-                  fmt::format("{:<{}}", label_of(l.layer.config), wl),
+        term::msg("    {}  {}  {}  {}{}",
+                  color::yellow(fmt::format("{:<{}}", l.alias.string(), wa)),
+                  id, fmt::format("{:<{}}", label_of(l.layer.config), wl),
                   color::cyan(l.mount.string()),
                   l.layer.relocatable ? " (relocatable)" : "");
     }
@@ -808,7 +812,7 @@ argparse::command image_command(const global_settings& settings) {
         c.add_flag("json", &ls_args::json, "print JSON");
         c.add_flag("no-header", &ls_args::no_header, "no header");
         c.add_flag("all", &ls_args::all,
-                   "with +: also the layers that are only inside images");
+                   "with a bare +: also the layers that are only inside images");
         c.action([&settings](const ls_args& a) { return image_ls(a, settings); });
         image_cli.add_subcommand(std::move(c).build());
     }

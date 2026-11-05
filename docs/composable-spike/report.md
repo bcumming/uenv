@@ -58,9 +58,10 @@ its label, the views that it loads, and its layers.
 
 The text output is for quick reading, and `--json` gives each field. `ls`
 shows the columns `uenv`, `meta`, `id` and `size`, and `ls +` shows the
-building blocks (`--all` adds the layers inside images). `find` adds the
+building blocks (`--all` adds the layers inside images). `ls +app/42.0`
+shows each layer that matches the label, also inside an image. `find` adds the
 date of the push. `inspect` shows the views first, then the digest, the
-meta, and the layers by id.
+meta, and the layers by alias and id.
 
 ## 2. How the spike settled the open questions
 

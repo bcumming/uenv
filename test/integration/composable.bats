@@ -179,6 +179,11 @@ function json_field() {
     refute_output --partial "+app/42.0:v1"
     run uenv $R image ls + --all --no-header
     assert_output --partial "+app/42.0:v1"
+    # a label lists each layer that matches it, with no --all
+    run uenv $R image ls +app/42.0 --no-header
+    assert_output --partial "+app/42.0:v1"
+    run uenv $R image ls +app --no-header
+    assert_output --partial "+app/42.0:v1"
     # the columns: uenv meta id size. No date (5-discovery.md, "Dates")
     run uenv $R image ls +
     assert_line --regexp "^uenv +meta +id +size$"
@@ -236,12 +241,13 @@ EOF
             {"from": "+reltools", "mount": "/user-environment/modules"}]}
 EOF
     uenv $R image compose "$TMP/c.json"
-    # inspect: the views first, and each layer by its id
+    # inspect: the views first, and each layer by its alias and id
     run uenv $R image inspect my-env
     assert_success
     assert_line --index 1 "  views:"
     assert_line --index 2 "    dev (default)"
-    assert_line --regexp "^    [0-9a-f]{16}  reltools/1.0:v1 +/user-environment/modules \(relocatable\)$"
+    assert_line --regexp "^    app       [0-9a-f]{16}  app/42.0:v1 +/user-environment$"
+    assert_line --regexp "^    reltools  [0-9a-f]{16}  reltools/1.0:v1 +/user-environment/modules \(relocatable\)$"
     # --json: each view has the same shape, name -> {description, env}
     run bash -c "uenv $R image inspect my-env --json | python3 -c 'import json,sys; j=json.load(sys.stdin); l=[l for l in j[\"layers\"] if l[\"alias\"]==\"reltools\"][0]; print(sorted(l[\"views\"][\"tools\"]), sorted(j[\"views\"][\"dev\"]), len(l[\"id\"]))'"
     assert_output "['description', 'env'] ['description', 'env', 'include'] 16"
