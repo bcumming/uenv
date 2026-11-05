@@ -30,57 +30,58 @@ struct push_args {
 
 int image_push(const push_args& args, const global_settings& settings) {
     // the destination: reg[/ns]:: or the default registry
-    std::optional<registry::target> t;
+    std::optional<registry::target> target;
     if (args.destination) {
-        auto a = registry::parse_address(*args.destination, settings.config,
-                                         args.registry);
-        if (!a) {
-            term::error("{}", a.error());
+        auto address = registry::parse_address(*args.destination,
+                                               settings.config, args.registry);
+        if (!address) {
+            term::error("{}", address.error());
             return 1;
         }
-        t = a->where;
+        target = address->where;
     } else {
-        auto r = registry::resolve_target(settings.config, args.registry);
-        if (!r) {
-            term::error("{}", r.error());
+        auto resolved =
+            registry::resolve_target(settings.config, args.registry);
+        if (!resolved) {
+            term::error("{}", resolved.error());
             return 1;
         }
-        t = *r;
+        target = *resolved;
     }
-    auto ctx = cli::make_context(settings);
-    util::expected<registry::push_result, std::string> r =
+    auto context = cli::make_context(settings);
+    util::expected<registry::push_result, std::string> result =
         util::unexpected{std::string{}};
     // a path (it starts with '/' or '.') is an OCI layout directory, else a
     // label: the form of the text decides, not the files that exist
     if (auto dir = parse_file_path(args.source)) {
-        r = registry::push_layout(*dir, *t, ctx);
+        result = registry::push_layout(*dir, *target, context);
     } else {
         auto stores = open_stores(settings.config);
         if (!stores) {
             term::error("{}", stores.error());
             return 1;
         }
-        auto q = parse_label_query(args.source, keys_of(settings.config),
-                                   settings.config.system_name);
-        if (!q) {
-            term::error("{}", q.error());
+        auto query = parse_label_query(args.source, keys_of(settings.config),
+                                       settings.config.system_name);
+        if (!query) {
+            term::error("{}", query.error());
             return 1;
         }
-        auto f = find_unique(*stores, *q, args.source);
-        if (!f) {
-            term::error("{}", f.error());
+        auto found = find_unique(*stores, *query, args.source);
+        if (!found) {
+            term::error("{}", found.error());
             return 1;
         }
-        r = registry::push((*stores)[f->store_index], f->record.digest, *t,
-                           ctx);
+        result = registry::push((*stores)[found->store_index],
+                                found->record.digest, *target, context);
     }
-    if (!r) {
-        term::error("{}", r.error());
+    if (!result) {
+        term::error("{}", result.error());
         return 1;
     }
     term::msg("pushed {}:{} ({} uploaded, {} mounted, {} present)",
-              r->repository, r->tag, ctx.st.uploaded, ctx.st.mounted,
-              ctx.st.skipped);
+              result->repository, result->tag, context.st.uploaded,
+              context.st.mounted, context.st.skipped);
     return 0;
 }
 
@@ -98,8 +99,9 @@ argparse::command image_push_command(const global_settings& settings) {
         .complete(completion::none());
     c.add_option("registry", &push_args::registry, "a registry")
         .complete(completion::none());
-    c.action(
-        [&settings](const push_args& a) { return image_push(a, settings); });
+    c.action([&settings](const push_args& args) {
+        return image_push(args, settings);
+    });
     return std::move(c).build();
 }
 

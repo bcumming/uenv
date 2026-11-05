@@ -25,19 +25,19 @@ struct delete_args {
 };
 
 int image_delete(const delete_args& args, const global_settings& settings) {
-    auto a =
+    auto address =
         registry::parse_address(args.address, settings.config, args.registry);
-    if (!a) {
-        term::error("{}", a.error());
+    if (!address) {
+        term::error("{}", address.error());
         return 1;
     }
-    auto ctx = cli::make_context(settings);
-    auto r = registry::remove(*a, ctx);
-    if (!r) {
-        term::error("{}", r.error());
+    auto context = cli::make_context(settings);
+    auto result = registry::remove(*address, context);
+    if (!result) {
+        term::error("{}", result.error());
         return 1;
     }
-    term::msg("deleted {}@{}", r->repository, r->digest.string());
+    term::msg("deleted {}@{}", result->repository, result->digest.string());
     return 0;
 }
 
@@ -51,8 +51,8 @@ argparse::command image_delete_command(const global_settings& settings) {
         .complete(completion::none());
     c.add_option("registry", &delete_args::registry, "a registry")
         .complete(completion::none());
-    c.action([&settings](const delete_args& a) {
-        return image_delete(a, settings);
+    c.action([&settings](const delete_args& args) {
+        return image_delete(args, settings);
     });
     return std::move(c).build();
 }

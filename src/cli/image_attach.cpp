@@ -30,29 +30,29 @@ struct attach_args {
 };
 
 int image_attach(const attach_args& args, const global_settings& settings) {
-    auto a =
+    auto address =
         registry::parse_address(args.address, settings.config, args.registry);
-    if (!a) {
-        term::error("{}", a.error());
+    if (!address) {
+        term::error("{}", address.error());
         return 1;
     }
-    auto ctx = cli::make_context(settings);
+    auto context = cli::make_context(settings);
     // a path (it starts with '/' or '.') is a file to read, else the content
     std::string content = args.content;
     if (auto file = parse_file_path(args.content)) {
-        auto b = util::read_file(*file);
-        if (!b) {
-            term::error("{}", b.error());
+        auto body = util::read_file(*file);
+        if (!body) {
+            term::error("{}", body.error());
             return 1;
         }
-        content = std::move(*b);
+        content = std::move(*body);
     }
-    auto r = registry::attach(*a, args.kind, content, ctx);
-    if (!r) {
-        term::error("{}", r.error());
+    auto repositories = registry::attach(*address, args.kind, content, context);
+    if (!repositories) {
+        term::error("{}", repositories.error());
         return 1;
     }
-    term::msg("attached {} in {}", args.kind, fmt::join(*r, ", "));
+    term::msg("attached {} in {}", args.kind, fmt::join(*repositories, ", "));
     return 0;
 }
 
@@ -72,8 +72,8 @@ argparse::command image_attach_command(const global_settings& settings) {
         .complete(completion::path());
     c.add_option("registry", &attach_args::registry, "a registry")
         .complete(completion::none());
-    c.action([&settings](const attach_args& a) {
-        return image_attach(a, settings);
+    c.action([&settings](const attach_args& args) {
+        return image_attach(args, settings);
     });
     return std::move(c).build();
 }

@@ -28,26 +28,26 @@ using json = nlohmann::json;
 
 namespace {
 
-std::string meta_string(const config& c) {
-    std::vector<std::string> v;
-    for (auto& [k, x] : c.meta) {
-        v.push_back(fmt::format("{}={}", k, x));
+std::string meta_string(const config& cfg) {
+    std::vector<std::string> pairs;
+    for (auto& [key, value] : cfg.meta) {
+        pairs.push_back(fmt::format("{}={}", key, value));
     }
-    return fmt::format("{}", fmt::join(v, ","));
+    return fmt::format("{}", fmt::join(pairs, ","));
 }
 
-json name_json(const std::optional<uenv::name>& n) {
-    return n ? json(n->string()) : json(nullptr);
+json name_json(const std::optional<uenv::name>& name) {
+    return name ? json(name->string()) : json(nullptr);
 }
 
-std::string size_string(std::uint64_t b) {
-    if (b > (1u << 30)) {
-        return fmt::format("{:.1f}GB", double(b) / (1u << 30));
+std::string size_string(std::uint64_t bytes) {
+    if (bytes > (1u << 30)) {
+        return fmt::format("{:.1f}GB", double(bytes) / (1u << 30));
     }
-    if (b > (1u << 20)) {
-        return fmt::format("{:.1f}MB", double(b) / (1u << 20));
+    if (bytes > (1u << 20)) {
+        return fmt::format("{:.1f}MB", double(bytes) / (1u << 20));
     }
-    return fmt::format("{}kB", (b + 1023) / 1024);
+    return fmt::format("{}kB", (bytes + 1023) / 1024);
 }
 
 // the date of a time stamp "yyyy-mm-ddThh:mm:ssZ": "yyyy-mm-dd"
@@ -55,119 +55,123 @@ std::string date_string(const std::string& added) {
     return added.substr(0, added.find('T'));
 }
 
-json record_to_json(const object_record& r, record_time t) {
+json record_to_json(const object_record& record, record_time time) {
     json layers = json::array();
-    for (auto& l : r.layers) {
-        layers.push_back({{"alias", l.alias.string()},
-                          {"mount", l.mount.string()},
-                          {"digest", l.digest.string()},
-                          {"label", label_string(l.cfg)},
-                          {"meta", meta_json(l.cfg.meta)}});
+    for (auto& layer : record.layers) {
+        layers.push_back({{"alias", layer.alias.string()},
+                          {"mount", layer.mount.string()},
+                          {"digest", layer.digest.string()},
+                          {"label", label_string(layer.cfg)},
+                          {"meta", meta_json(layer.cfg.meta)}});
     }
-    json j{{"kind", r.kind == format::object_kind::image ? "image" : "layer"},
-           {"label", label_string(r.cfg)},
-           {"name", r.cfg.name.string()},
-           {"version", name_json(r.cfg.version)},
-           {"release", name_json(r.cfg.release)},
-           {"meta", meta_json(r.cfg.meta)},
-           {"id", r.id},
-           {"digest", r.digest.string()},
-           {"size", r.size},
-           {"layers", layers}};
-    if (!r.added.empty()) {
-        j[t == record_time::added ? "added" : "pushed"] = r.added;
+    json out{
+        {"kind", record.kind == format::object_kind::image ? "image" : "layer"},
+        {"label", label_string(record.cfg)},
+        {"name", record.cfg.name.string()},
+        {"version", name_json(record.cfg.version)},
+        {"release", name_json(record.cfg.release)},
+        {"meta", meta_json(record.cfg.meta)},
+        {"id", record.id},
+        {"digest", record.digest.string()},
+        {"size", record.size},
+        {"layers", layers}};
+    if (!record.added.empty()) {
+        out[time == record_time::added ? "added" : "pushed"] = record.added;
     }
-    if (r.kind == format::object_kind::layer) {
-        j["building_block"] = r.standalone;
+    if (record.kind == format::object_kind::layer) {
+        out["building_block"] = record.standalone;
     }
-    if (r.repository) {
-        j["repository"] = *r.repository;
-        j["tag"] = r.tag.value_or("");
+    if (record.repository) {
+        out["repository"] = *record.repository;
+        out["tag"] = record.tag.value_or("");
     }
-    return j;
+    return out;
 }
 
 } // namespace
 
 json meta_json(const std::map<uenv::name, std::string>& meta) {
-    json j = json::object();
-    for (auto& [k, v] : meta) {
-        j[k.string()] = v;
+    json out = json::object();
+    for (auto& [key, value] : meta) {
+        out[key.string()] = value;
     }
-    return j;
+    return out;
 }
 
 void print_records(const std::vector<object_record>& records, bool json_out,
-                   bool no_header, record_time t) {
+                   bool no_header, record_time time) {
     if (json_out) {
-        json j = json::array();
-        for (auto& r : records) {
-            j.push_back(record_to_json(r, t));
+        json out = json::array();
+        for (auto& record : records) {
+            out.push_back(record_to_json(record, time));
         }
-        term::msg("{}", j.dump(2));
+        term::msg("{}", out.dump(2));
         return;
     }
     // each column is as wide as its widest value
-    const bool dates = t == record_time::pushed;
+    const bool dates = time == record_time::pushed;
     struct row {
         std::string uenv, meta, id, size, date;
     };
     std::vector<row> rows;
-    row width{"uenv", "meta", "id", "size", "date"};
-    for (auto& r : records) {
-        rows.push_back({(r.kind == format::object_kind::layer ? "+" : "") +
-                            label_string(r.cfg),
-                        meta_string(r.cfg), r.id, size_string(r.size),
-                        date_string(r.added)});
+    row header{"uenv", "meta", "id", "size", "date"};
+    for (auto& record : records) {
+        rows.push_back({(record.kind == format::object_kind::layer ? "+" : "") +
+                            label_string(record.cfg),
+                        meta_string(record.cfg), record.id,
+                        size_string(record.size), date_string(record.added)});
     }
-    auto w = [&](auto field) {
-        std::size_t n = (width.*field).size();
-        for (auto& x : rows) {
-            n = std::max(n, (x.*field).size());
+    auto width_of = [&](auto field) {
+        std::size_t widest = (header.*field).size();
+        for (auto& entry : rows) {
+            widest = std::max(widest, (entry.*field).size());
         }
-        return n;
+        return widest;
     };
-    const auto wu = w(&row::uenv), wm = w(&row::meta), wi = w(&row::id),
-               ws = w(&row::size);
-    auto print = [&](const row& x) {
-        auto line = fmt::format("{:<{}}  {:<{}}  {:<{}}  {:>{}}", x.uenv, wu,
-                                x.meta, wm, x.id, wi, x.size, ws);
+    const auto uenv_width = width_of(&row::uenv),
+               meta_width = width_of(&row::meta), id_width = width_of(&row::id),
+               size_width = width_of(&row::size);
+    auto print = [&](const row& entry) {
+        auto line = fmt::format("{:<{}}  {:<{}}  {:<{}}  {:>{}}", entry.uenv,
+                                uenv_width, entry.meta, meta_width, entry.id,
+                                id_width, entry.size, size_width);
         if (dates) {
-            line += "  " + x.date;
+            line += "  " + entry.date;
         }
         term::msg("{}", line);
     };
     if (!no_header) {
         // the header in yellow, as v1 does: pad first, then color
-        auto line =
-            fmt::format("{:<{}}  {:<{}}  {:<{}}  {:>{}}", width.uenv, wu,
-                        width.meta, wm, width.id, wi, width.size, ws);
+        auto line = fmt::format("{:<{}}  {:<{}}  {:<{}}  {:>{}}", header.uenv,
+                                uenv_width, header.meta, meta_width, header.id,
+                                id_width, header.size, size_width);
         if (dates) {
-            line += "  " + width.date;
+            line += "  " + header.date;
         }
         term::msg("{}", color::yellow(line));
     }
-    for (auto& x : rows) {
-        print(x);
+    for (auto& entry : rows) {
+        print(entry);
     }
 }
 
 registry::context make_context(const global_settings& settings) {
-    registry::context ctx;
-    ctx.cfg = &settings.config;
-    ctx.keys = keys_of(settings.config);
-    ctx.default_system = settings.config.system_name;
+    registry::context context;
+    context.cfg = &settings.config;
+    context.keys = keys_of(settings.config);
+    context.default_system = settings.config.system_name;
     auto cache = user_cache_path(settings.calling_environment);
-    ctx.cache = cache ? *cache : fs::temp_directory_path() / "uenv-cache";
+    context.cache = cache ? *cache : fs::temp_directory_path() / "uenv-cache";
     // each registry uses its own credentials: the client asks for those of
     // the registry that it connects to
     const auto& env = settings.calling_environment;
-    ctx.credentials = [&env](const util::url& base) {
-        auto c =
+    context.credentials = [&env](const util::url& base) {
+        auto credentials =
             resolve_registry_credentials(env, base, std::nullopt, std::nullopt);
-        return c ? std::optional<oci::credentials>{*c} : std::nullopt;
+        return credentials ? std::optional<oci::credentials>{*credentials}
+                           : std::nullopt;
     };
-    return ctx;
+    return context;
 }
 
 } // namespace uenv::cli

@@ -47,107 +47,116 @@ int image_inspect(const inspect_args& args, const global_settings& settings) {
         term::error("{}", resolved.error());
         return 1;
     }
-    auto img = &resolved->image;
+    auto image = &resolved->image;
     json layers = json::array();
-    for (auto& l : img->layers()) {
+    for (auto& entry : image->layers()) {
         // the same shape as the image views: name -> {description, env}
         json views = json::object();
-        for (auto& [k, v] : l.layer.views) {
-            views[k.string()] = {{"description", v.description},
-                                 {"env", format::env_to_json(v.env)}};
+        for (auto& [name, view] : entry.layer.views) {
+            views[name.string()] = {{"description", view.description},
+                                    {"env", format::env_to_json(view.env)}};
         }
         layers.push_back(
-            {{"alias", l.alias.string()},
-             {"mount", l.mount.string()},
-             {"build_mount", l.layer.mount.string()},
-             {"relocatable", l.layer.relocatable},
-             {"label", label_string(l.layer.config)},
-             {"meta", cli::meta_json(l.layer.config.meta)},
-             {"digest", l.layer.digest() ? l.layer.digest()->string() : ""},
-             {"id",
-              l.layer.digest() ? format::short_id(*l.layer.digest()) : ""},
+            {{"alias", entry.alias.string()},
+             {"mount", entry.mount.string()},
+             {"build_mount", entry.layer.mount.string()},
+             {"relocatable", entry.layer.relocatable},
+             {"label", label_string(entry.layer.config)},
+             {"meta", cli::meta_json(entry.layer.config.meta)},
+             {"digest",
+              entry.layer.digest() ? entry.layer.digest()->string() : ""},
+             {"id", entry.layer.digest()
+                        ? format::short_id(*entry.layer.digest())
+                        : ""},
              {"squashfs",
-              l.layer.store.file ? l.layer.store.file->string() : ""},
+              entry.layer.store.file ? entry.layer.store.file->string() : ""},
              {"views", views}});
     }
     json views = json::object();
-    for (auto& [k, v] : img->views()) {
-        json inc = json::array();
-        for (auto& r : v.include) {
-            inc.push_back(format_as(r));
+    for (auto& [name, view] : image->views()) {
+        json include = json::array();
+        for (auto& ref : view.include) {
+            include.push_back(format_as(ref));
         }
-        views[format_as(k)] = {{"description", v.description},
-                               {"include", inc},
-                               {"env", format::env_to_json(v.env)}};
+        views[format_as(name)] = {{"description", view.description},
+                                  {"include", include},
+                                  {"env", format::env_to_json(view.env)}};
     }
     std::vector<std::string> defaults;
-    for (auto& d : img->default_views()) {
-        defaults.push_back(format_as(d));
+    for (auto& name : image->default_views()) {
+        defaults.push_back(format_as(name));
     }
-    const std::string kind = img->kind() == uenv::image_kind::layer ? "layer"
-                             : img->kind() == uenv::image_kind::runtime_merge
+    const std::string kind = image->kind() == uenv::image_kind::layer ? "layer"
+                             : image->kind() == uenv::image_kind::runtime_merge
                                  ? "runtime merge"
                                  : "image";
-    json j{{"kind", kind},
-           {"label", label_string(img->config())},
-           {"description", img->config().description},
-           {"meta", cli::meta_json(img->config().meta)},
-           {"digest", img->digest() ? img->digest()->string() : ""},
-           {"layers", layers},
-           {"views", views},
-           {"default_views", defaults}};
+    json out{{"kind", kind},
+             {"label", label_string(image->config())},
+             {"description", image->config().description},
+             {"meta", cli::meta_json(image->config().meta)},
+             {"digest", image->digest() ? image->digest()->string() : ""},
+             {"layers", layers},
+             {"views", views},
+             {"default_views", defaults}};
     if (args.json) {
-        term::msg("{}", j.dump(2));
+        term::msg("{}", out.dump(2));
         return 0;
     }
     // the colors of v1: a field in blue, a name in yellow, a value in cyan.
     // The views first: they are what a user loads.
     term::msg("{} {}", color::blue(kind),
-              color::yellow(label_string(img->config())));
-    if (!img->config().description.empty()) {
-        term::msg("  {}", img->config().description);
+              color::yellow(label_string(image->config())));
+    if (!image->config().description.empty()) {
+        term::msg("  {}", image->config().description);
     }
-    if (img->views().empty()) {
+    if (image->views().empty()) {
         term::msg("  {} none", color::blue("views:"));
     } else {
         term::msg("  {}", color::blue("views:"));
-        for (auto& [k, v] : img->views()) {
-            const bool is_default = std::find(img->default_views().begin(),
-                                              img->default_views().end(),
-                                              k) != img->default_views().end();
-            term::msg("    {}{}{}", color::yellow(format_as(k)),
+        for (auto& [name, view] : image->views()) {
+            const bool is_default =
+                std::find(image->default_views().begin(),
+                          image->default_views().end(),
+                          name) != image->default_views().end();
+            term::msg("    {}{}{}", color::yellow(format_as(name)),
                       is_default ? color::red(" (default)") : std::string{},
-                      v.description.empty() ? std::string{}
-                                            : ": " + v.description);
+                      view.description.empty() ? std::string{}
+                                               : ": " + view.description);
         }
     }
     term::msg("  {} {}", color::blue("digest:"),
-              color::cyan(j["digest"].get<std::string>()));
-    if (img->config().meta.empty()) {
+              color::cyan(out["digest"].get<std::string>()));
+    if (image->config().meta.empty()) {
         term::msg("  {} none", color::blue("meta:"));
     } else {
         term::msg("  {}", color::blue("meta:"));
-        for (auto& [k, v] : img->config().meta) {
-            term::msg("    {}: {}", color::yellow(k.string()), color::cyan(v));
+        for (auto& [key, value] : image->config().meta) {
+            term::msg("    {}: {}", color::yellow(key.string()),
+                      color::cyan(value));
         }
     }
     // each layer by its alias, the name that views and compose files use,
     // then its id: a squashfs file that is started directly has no id
-    std::size_t wa = 0;
-    std::size_t wl = 0;
-    for (auto& l : img->layers()) {
-        wa = std::max(wa, l.alias.string().size());
-        wl = std::max(wl, label_string(l.layer.config).size());
+    std::size_t alias_width = 0;
+    std::size_t label_width = 0;
+    for (auto& entry : image->layers()) {
+        alias_width = std::max(alias_width, entry.alias.string().size());
+        label_width =
+            std::max(label_width, label_string(entry.layer.config).size());
     }
     term::msg("  {}", color::blue("layers:"));
-    for (auto& l : img->layers()) {
-        const auto d = l.layer.digest();
-        const std::string id = d ? format::short_id(*d) : std::string(16, '-');
+    for (auto& entry : image->layers()) {
+        const auto digest = entry.layer.digest();
+        const std::string id =
+            digest ? format::short_id(*digest) : std::string(16, '-');
         term::msg("    {}  {}  {}  {}{}",
-                  color::yellow(fmt::format("{:<{}}", l.alias.string(), wa)),
-                  id, fmt::format("{:<{}}", label_string(l.layer.config), wl),
-                  color::cyan(l.mount.string()),
-                  l.layer.relocatable ? " (relocatable)" : "");
+                  color::yellow(
+                      fmt::format("{:<{}}", entry.alias.string(), alias_width)),
+                  id,
+                  fmt::format("{:<{}}", label_string(entry.layer.config),
+                              label_width),
+                  color::cyan(entry.mount.string()),
+                  entry.layer.relocatable ? " (relocatable)" : "");
     }
     return 0;
 }
@@ -161,8 +170,8 @@ argparse::command image_inspect_command(const global_settings& settings) {
         .required()
         .complete(completion::custom("uenv_list"));
     c.add_flag("json", &inspect_args::json, "print JSON");
-    c.action([&settings](const inspect_args& a) {
-        return image_inspect(a, settings);
+    c.action([&settings](const inspect_args& args) {
+        return image_inspect(args, settings);
     });
     return std::move(c).build();
 }

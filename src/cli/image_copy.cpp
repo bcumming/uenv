@@ -29,35 +29,36 @@ struct copy_args {
 };
 
 int image_copy(const copy_args& args, const global_settings& settings) {
-    auto src =
+    auto source =
         registry::parse_address(args.source, settings.config, args.registry);
-    if (!src) {
-        term::error("{}", src.error());
+    if (!source) {
+        term::error("{}", source.error());
         return 1;
     }
-    auto dst = registry::parse_address(args.destination, settings.config,
-                                       args.registry);
-    if (!dst) {
-        term::error("{}", dst.error());
+    auto destination = registry::parse_address(args.destination,
+                                               settings.config, args.registry);
+    if (!destination) {
+        term::error("{}", destination.error());
         return 1;
     }
     std::vector<config_change> changes;
     if (args.set) {
-        auto c = parse_config_changes(*args.set);
-        if (!c) {
-            term::error("{}", c.error());
+        auto parsed = parse_config_changes(*args.set);
+        if (!parsed) {
+            term::error("{}", parsed.error());
             return 1;
         }
-        changes = std::move(*c);
+        changes = std::move(*parsed);
     }
-    auto ctx = cli::make_context(settings);
-    auto r = registry::copy(*src, dst->where, ctx, changes);
-    if (!r) {
-        term::error("{}", r.error());
+    auto context = cli::make_context(settings);
+    auto result = registry::copy(*source, destination->where, context, changes);
+    if (!result) {
+        term::error("{}", result.error());
         return 1;
     }
-    term::msg("copied to {}:{} digest={} ({} referrers)", r->repository, r->tag,
-              r->digest.string(), ctx.st.referrers_copied);
+    term::msg("copied to {}:{} digest={} ({} referrers)", result->repository,
+              result->tag, result->digest.string(),
+              context.st.referrers_copied);
     return 0;
 }
 
@@ -77,8 +78,9 @@ argparse::command image_copy_command(const global_settings& settings) {
         .complete(completion::none());
     c.add_option("registry", &copy_args::registry, "a registry")
         .complete(completion::none());
-    c.action(
-        [&settings](const copy_args& a) { return image_copy(a, settings); });
+    c.action([&settings](const copy_args& args) {
+        return image_copy(args, settings);
+    });
     return std::move(c).build();
 }
 

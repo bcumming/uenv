@@ -25,35 +25,35 @@ struct rm_args {
 };
 
 int image_rm(const rm_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings.config);
-    if (!s) {
-        term::error("{}", s.error());
+    auto store = open_user_store(settings.config);
+    if (!store) {
+        term::error("{}", store.error());
         return 1;
     }
-    auto q = parse_label_query(args.label, keys_of(settings.config));
-    if (!q) {
-        term::error("{}", q.error());
+    auto query = parse_label_query(args.label, keys_of(settings.config));
+    if (!query) {
+        term::error("{}", query.error());
         return 1;
     }
-    std::vector<store> one;
-    one.push_back(std::move(*s));
-    auto f = find_unique(one, *q, args.label);
-    if (!f) {
-        term::error("{}", f.error());
+    std::vector<uenv::store> stores;
+    stores.push_back(std::move(*store));
+    auto found = find_unique(stores, *query, args.label);
+    if (!found) {
+        term::error("{}", found.error());
         return 1;
     }
-    if (q->layer && !f->record.standalone) {
+    if (query->layer && !found->record.standalone) {
         term::error("the layer {} is part of an image: delete the image",
-                    label_string(f->record.cfg));
+                    label_string(found->record.cfg));
         return 1;
     }
-    auto r = one[0].remove(f->record.digest);
-    if (!r) {
-        term::error("{}", r.error());
+    auto deleted = stores[0].remove(found->record.digest);
+    if (!deleted) {
+        term::error("{}", deleted.error());
         return 1;
     }
-    term::msg("removed {} ({} blobs deleted)", label_string(f->record.cfg),
-              r->size());
+    term::msg("removed {} ({} blobs deleted)", label_string(found->record.cfg),
+              deleted->size());
     return 0;
 }
 
@@ -64,7 +64,8 @@ argparse::command image_rm_command(const global_settings& settings) {
     c.add_positional("label", &rm_args::label, "a label or an id")
         .required()
         .complete(completion::none());
-    c.action([&settings](const rm_args& a) { return image_rm(a, settings); });
+    c.action(
+        [&settings](const rm_args& args) { return image_rm(args, settings); });
     return std::move(c).build();
 }
 

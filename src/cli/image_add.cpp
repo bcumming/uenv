@@ -37,9 +37,9 @@ struct add_args {
 };
 
 int image_add(const add_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings.config);
-    if (!s) {
-        term::error("{}", s.error());
+    auto store = open_user_store(settings.config);
+    if (!store) {
+        term::error("{}", store.error());
         return 1;
     }
     bool as_layer = args.label.starts_with("+");
@@ -70,39 +70,39 @@ int image_add(const add_args& args, const global_settings& settings) {
                 return util::unexpected{body.error()};
             }
             // the label gives the fields that the file does not give
-            auto j = json::parse(*body, nullptr, false);
-            if (j.is_discarded()) {
+            auto config_json = json::parse(*body, nullptr, false);
+            if (config_json.is_discarded()) {
                 return util::unexpected{
                     fmt::format("{} is not valid JSON", *args.config)};
             }
-            j["name"] = *label->name;
-            j["version"] = *label->version;
-            j["release"] = *label->tag;
-            if (!j.contains("meta")) {
-                j["meta"] = json::object();
+            config_json["name"] = *label->name;
+            config_json["version"] = *label->version;
+            config_json["release"] = *label->tag;
+            if (!config_json.contains("meta")) {
+                config_json["meta"] = json::object();
             }
             if (label->uarch) {
-                j["meta"]["uarch"] = *label->uarch;
+                config_json["meta"]["uarch"] = *label->uarch;
             }
-            return format::parse_layer_config(j.dump());
+            return format::parse_layer_config(config_json.dump());
         }
-        auto m = read_squashfs_meta(sqfs);
-        if (!m) {
-            return util::unexpected{m.error()};
+        auto meta = read_squashfs_meta(sqfs);
+        if (!meta) {
+            return util::unexpected{meta.error()};
         }
-        auto c = v1::make_layer_config(
-            *m, v1::v1_label{*label->version, *label->tag, label->system,
-                             label->uarch});
-        if (!c) {
-            return c;
+        auto converted = v1::make_layer_config(
+            *meta, v1::v1_label{*label->version, *label->tag, label->system,
+                                label->uarch});
+        if (!converted) {
+            return converted;
         }
         // the name of the label, not the name in meta/env.json
-        auto n = uenv::name::parse(*label->name);
-        if (!n) {
-            return util::unexpected{n.error()};
+        auto name = uenv::name::parse(*label->name);
+        if (!name) {
+            return util::unexpected{name.error()};
         }
-        c->shared.name = *n;
-        return c;
+        converted->shared.name = *name;
+        return converted;
     }();
     if (!cfg) {
         term::error("{}", cfg.error());
@@ -112,13 +112,13 @@ int image_add(const add_args& args, const global_settings& settings) {
     if (label->system) {
         image_meta[settings.config.label.at] = *label->system;
     }
-    auto r = add_squashfs(*s, sqfs, *cfg, image_meta, as_layer);
-    if (!r) {
-        term::error("{}", r.error());
+    auto record = add_squashfs(*store, sqfs, *cfg, image_meta, as_layer);
+    if (!record) {
+        term::error("{}", record.error());
         return 1;
     }
     term::msg("added {}{} id={} digest={}", as_layer ? "+" : "",
-              label_string(r->cfg), r->id, r->digest.string());
+              label_string(record->cfg), record->id, record->digest.string());
     return 0;
 }
 
@@ -137,7 +137,9 @@ argparse::command image_add_command(const global_settings& settings) {
     c.add_option("config", &add_args::config,
                  "a layer config (JSON), in place of meta/env.json")
         .complete(completion::file("*.json"));
-    c.action([&settings](const add_args& a) { return image_add(a, settings); });
+    c.action([&settings](const add_args& args) {
+        return image_add(args, settings);
+    });
     return std::move(c).build();
 }
 

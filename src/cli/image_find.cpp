@@ -29,38 +29,39 @@ struct find_args {
 };
 
 int image_find(const find_args& args, const global_settings& settings) {
-    auto a = registry::parse_address(args.label.value_or(""), settings.config,
-                                     args.registry);
-    if (!a) {
-        term::error("{}", a.error());
+    auto address = registry::parse_address(args.label.value_or(""),
+                                           settings.config, args.registry);
+    if (!address) {
+        term::error("{}", address.error());
         return 1;
     }
-    auto ctx = cli::make_context(settings);
-    auto cat = registry::catalogue::open(a->where, ctx);
-    if (!cat) {
-        term::error("{}", cat.error());
+    auto context = cli::make_context(settings);
+    auto catalogue = registry::catalogue::open(address->where, context);
+    if (!catalogue) {
+        term::error("{}", catalogue.error());
         return 1;
     }
-    auto st = cat->refresh();
-    if (!st) {
-        term::error("{}", st.error());
+    auto stats = catalogue->refresh();
+    if (!stats) {
+        term::error("{}", stats.error());
         return 1;
     }
-    spdlog::info("catalogue refresh: {} events, {} requests", st->events,
-                 st->requests);
+    spdlog::info("catalogue refresh: {} events, {} requests", stats->events,
+                 stats->requests);
     // the query of the label; with no label, each image of the system
-    label_query q;
-    if (a->query) {
-        q = *a->query;
+    label_query query;
+    if (address->query) {
+        query = *address->query;
     } else if (settings.config.system_name) {
-        q.meta[settings.config.label.at] = *settings.config.system_name;
+        query.meta[settings.config.label.at] = *settings.config.system_name;
     }
-    auto r = cat->db().query(q);
-    if (!r) {
-        term::error("{}", r.error());
+    auto records = catalogue->db().query(query);
+    if (!records) {
+        term::error("{}", records.error());
         return 1;
     }
-    cli::print_records(*r, args.json, args.no_header, cli::record_time::pushed);
+    cli::print_records(*records, args.json, args.no_header,
+                       cli::record_time::pushed);
     return 0;
 }
 
@@ -74,8 +75,9 @@ argparse::command image_find_command(const global_settings& settings) {
         .complete(completion::none());
     c.add_flag("json", &find_args::json, "print JSON");
     c.add_flag("no-header", &find_args::no_header, "no header");
-    c.action(
-        [&settings](const find_args& a) { return image_find(a, settings); });
+    c.action([&settings](const find_args& args) {
+        return image_find(args, settings);
+    });
     return std::move(c).build();
 }
 

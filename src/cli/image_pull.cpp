@@ -25,25 +25,26 @@ struct pull_args {
 };
 
 int image_pull(const pull_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings.config);
-    if (!s) {
-        term::error("{}", s.error());
+    auto store = open_user_store(settings.config);
+    if (!store) {
+        term::error("{}", store.error());
         return 1;
     }
-    auto a =
+    auto address =
         registry::parse_address(args.address, settings.config, args.registry);
-    if (!a) {
-        term::error("{}", a.error());
+    if (!address) {
+        term::error("{}", address.error());
         return 1;
     }
-    auto ctx = cli::make_context(settings);
-    auto r = registry::pull(*s, *a, ctx);
-    if (!r) {
-        term::error("{}", r.error());
+    auto context = cli::make_context(settings);
+    auto record = registry::pull(*store, *address, context);
+    if (!record) {
+        term::error("{}", record.error());
         return 1;
     }
     term::msg("pulled {} id={} ({} squashfs downloaded, {} already present)",
-              label_string(r->cfg), r->id, ctx.st.downloaded, ctx.st.skipped);
+              label_string(record->cfg), record->id, context.st.downloaded,
+              context.st.skipped);
     return 0;
 }
 
@@ -56,8 +57,9 @@ argparse::command image_pull_command(const global_settings& settings) {
         .complete(completion::none());
     c.add_option("registry", &pull_args::registry, "a registry")
         .complete(completion::none());
-    c.action(
-        [&settings](const pull_args& a) { return image_pull(a, settings); });
+    c.action([&settings](const pull_args& args) {
+        return image_pull(args, settings);
+    });
     return std::move(c).build();
 }
 

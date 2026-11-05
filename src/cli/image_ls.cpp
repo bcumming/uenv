@@ -37,35 +37,35 @@ int image_ls(const ls_args& args, const global_settings& settings) {
         return 1;
     }
     std::string text = args.label.value_or("");
-    label_query q;
+    label_query query;
     if (text == "+") {
-        q.layer = true;
+        query.layer = true;
     } else if (!text.empty()) {
-        auto p = parse_label_query(text, keys_of(settings.config),
-                                   settings.config.system_name);
-        if (!p) {
-            term::error("{}", p.error());
+        auto parsed = parse_label_query(text, keys_of(settings.config),
+                                        settings.config.system_name);
+        if (!parsed) {
+            term::error("{}", parsed.error());
             return 1;
         }
-        q = *p;
+        query = *parsed;
     } else if (settings.config.system_name) {
-        q.meta[settings.config.label.at] = *settings.config.system_name;
+        query.meta[settings.config.label.at] = *settings.config.system_name;
     }
     std::vector<object_record> out;
-    for (auto& s : *stores) {
-        auto r = s.query(q);
-        if (!r) {
-            term::error("{}", r.error());
+    for (auto& store : *stores) {
+        auto records = store.query(query);
+        if (!records) {
+            term::error("{}", records.error());
             return 1;
         }
-        for (auto& o : *r) {
+        for (auto& record : *records) {
             // a bare + lists the building blocks, or each layer with --all.
             // A label lists each layer that matches it (5-discovery.md,
             // "Images and layers")
-            if (q.layer && text == "+" && !o.standalone && !args.all) {
+            if (query.layer && text == "+" && !record.standalone && !args.all) {
                 continue;
             }
-            out.push_back(o);
+            out.push_back(record);
         }
     }
     cli::print_records(out, args.json, args.no_header, cli::record_time::added);
@@ -82,7 +82,8 @@ argparse::command image_ls_command(const global_settings& settings) {
     c.add_flag("no-header", &ls_args::no_header, "no header");
     c.add_flag("all", &ls_args::all,
                "with a bare +: also the layers that are only inside images");
-    c.action([&settings](const ls_args& a) { return image_ls(a, settings); });
+    c.action(
+        [&settings](const ls_args& args) { return image_ls(args, settings); });
     return std::move(c).build();
 }
 

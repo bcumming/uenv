@@ -26,9 +26,9 @@ struct compose_args {
 };
 
 int image_compose(const compose_args& args, const global_settings& settings) {
-    auto s = open_user_store(settings.config);
-    if (!s) {
-        term::error("{}", s.error());
+    auto store = open_user_store(settings.config);
+    if (!store) {
+        term::error("{}", store.error());
         return 1;
     }
     auto file = parse_file_path(args.file);
@@ -46,13 +46,13 @@ int image_compose(const compose_args& args, const global_settings& settings) {
         term::error("{} is not valid JSON", args.file);
         return 1;
     }
-    auto r = compose(*s, spec, keys_of(settings.config));
-    if (!r) {
-        term::error("{}", r.error());
+    auto record = compose(*store, spec, keys_of(settings.config));
+    if (!record) {
+        term::error("{}", record.error());
         return 1;
     }
-    term::msg("composed {} id={} digest={}", label_string(r->cfg), r->id,
-              r->digest.string());
+    term::msg("composed {} id={} digest={}", label_string(record->cfg),
+              record->id, record->digest.string());
     return 0;
 }
 
@@ -64,8 +64,8 @@ argparse::command image_compose_command(const global_settings& settings) {
     c.add_positional("file", &compose_args::file, "the compose file (JSON)")
         .required()
         .complete(completion::file("*.json"));
-    c.action([&settings](const compose_args& a) {
-        return image_compose(a, settings);
+    c.action([&settings](const compose_args& args) {
+        return image_compose(args, settings);
     });
     return std::move(c).build();
 }
