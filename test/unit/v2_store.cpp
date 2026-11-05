@@ -1,6 +1,7 @@
 // Tests of the local repository (3-repository.md), and of the local
 // operations: add (promote) and compose.
 
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -49,10 +50,16 @@ uenv::store new_store() {
     return *uenv::store::create(tmpdir() / "repo");
 }
 
-// run f in a child process with UENV_TEST_FAULT set: returns the exit status
+// run f in a child process with UENV_TEST_FAULT set: returns the exit status.
+// The child writes no stderr, so that the message of the hook is not in the
+// output of the tests: the test checks the exit status.
 template <typename F> int in_child_with_fault(const char* point, F&& f) {
     auto pid = fork();
     if (pid == 0) {
+        if (int null = open("/dev/null", O_WRONLY); null >= 0) {
+            dup2(null, STDERR_FILENO);
+            close(null);
+        }
         setenv("UENV_TEST_FAULT", point, 1);
         f();
         _exit(0);

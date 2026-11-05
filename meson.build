@@ -207,11 +207,18 @@ if use_fuse
     lib_uenv_deps += [squashfuse_dep, fuse_dep]
 endif
 
+# the fault hook (test_fault in store.h) is compiled only for the tests
+lib_uenv_args = []
+if get_option('tests').enabled()
+    lib_uenv_args += ['-DUENV_TEST_FAULTS']
+endif
+
 lib_uenv = static_library(
     'uenv',
     lib_uenv_src,
     dependencies: lib_uenv_deps,
     include_directories: lib_uenv_inc,
+    cpp_args: lib_uenv_args,
 )
 
 uenv_dep = declare_dependency(

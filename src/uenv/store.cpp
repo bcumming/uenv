@@ -29,6 +29,7 @@ namespace fs = std::filesystem;
 using util::unexpected;
 using util::sqlite::value;
 
+#ifdef UENV_TEST_FAULTS
 void test_fault(std::string_view point) {
     // test only: the one place where uenv reads the environment directly,
     // so that a fault can be injected into any process, also a child.
@@ -40,6 +41,10 @@ void test_fault(std::string_view point) {
         }
     }
 }
+#else
+void test_fault(std::string_view) {
+}
+#endif
 
 std::string now_utc() {
     auto t = std::time(nullptr);

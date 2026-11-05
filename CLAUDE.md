@@ -40,7 +40,7 @@ sudo meson install --destdir=$PWD/staging --no-rebuild --skip-subprojects
 ### Build Options
 
 Configure via `-Doption=value` with `meson setup`:
-- `tests=enabled|disabled` - Enable test suite (default: disabled)
+- `tests=enabled|disabled` - Enable test suite (default: disabled). It also compiles the fault hook `test_fault` (`UENV_TEST_FAULT`, see `src/uenv/store.h`) that the crash tests use: a build without tests has no hook
 - `cli=true|false` - Build CLI tool (default: true)
 - `slurm_plugin=true|false` - Build Slurm plugin (default: true)
 - `squashfs_mount=true|false` - Build squashfs-mount helper (default: false)

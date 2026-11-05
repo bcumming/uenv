@@ -25,6 +25,8 @@ inline constexpr std::int64_t store_layout_version = 2;
 
 // a test hook: if the environment variable UENV_TEST_FAULT names `point`, the
 // process exits at once with status 99, as if it was killed at that step.
+// Only a build with -Dtests=enabled has the hook: in other builds it does
+// nothing, and uenv does not read UENV_TEST_FAULT.
 void test_fault(std::string_view point);
 
 struct layer_ref {
